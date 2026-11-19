@@ -844,6 +844,9 @@ def main():
     ap.add_argument("-o", "--output", help="write the markdown report here (default: stdout)")
     ap.add_argument("--classes", help="also dump every class / Swift type name to this file")
     a = ap.parse_args()
+    for out in (a.output, a.classes):
+        if out and os.path.dirname(out):
+            os.makedirs(os.path.dirname(out), exist_ok=True)
     report = analyse(a.path, a.classes)
     if a.output:
         with io.open(a.output, "w", encoding="utf-8") as fh:
