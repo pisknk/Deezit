@@ -3,6 +3,7 @@
 #import "DZPrefs.h"
 #import "DZAudioHook.h"
 #import "DZLockArtwork.h"
+#import "DZBufferProbe.h"
 #import "DZSettingsEntry.h"
 #import "DZLog.h"
 
@@ -140,6 +141,7 @@ void DZToast(NSString *message) {
         @"audio hook: %@\n"
         @"%@\n"
         @"%@\n"
+        @"%@\n"
         @"effect: %@ · speed %.2fx · reverb mix %d%% room %d%% damp %d%%\n"
         @"gestures: 3-finger double tap = this panel · 3-finger hold = settings\n"
         @"──────────────────────────────────────────\n",
@@ -149,6 +151,7 @@ void DZToast(NSString *message) {
         DZPrefBool(kDZAudioHook) ? @"on" : @"OFF (kill switch)",
         DZAudioStatusSummary(),
         DZLockArtworkStatus(),
+        DZBufferProbeStatus(),
         p.enabled ? @"ON" : @"off", p.speed,
         (int)lroundf(p.reverbMix * 100), (int)lroundf(p.reverbRoom * 100), (int)lroundf(p.reverbDamp * 100)];
 }

@@ -23,6 +23,7 @@ Deezit_FILES = Tweak.x \
 	DZPresets.m \
 	DZDSP.c \
 	DZAudioHook.x \
+	DZBufferProbe.x \
 	DZProbes.x \
 	DZPlayerMenu.x \
 	DZAppleMusic.m \

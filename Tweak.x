@@ -11,6 +11,7 @@
 #import "DZAudioHook.h"
 #import "DZSettingsEntry.h"
 #import "DZLockArtwork.h"
+#import "DZBufferProbe.h"
 
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
@@ -33,6 +34,7 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
 
         DZPrefsBootstrap();
         DZAudioInstall();
+        DZBufferProbeInstall();
         DZProbesInstall();
         DZPlayerMenuInstall();
         DZLockArtworkInstall();
