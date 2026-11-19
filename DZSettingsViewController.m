@@ -67,6 +67,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 #pragma mark - controller
 
+@interface DZSettingsViewController ()
+@property (nonatomic, copy) NSString *pageTitle;
+@end
+
 @implementation DZSettingsViewController
 
 + (UIViewController *)presentableController {
@@ -76,9 +80,22 @@ typedef NS_ENUM(NSInteger, DZSection) {
     return nav;
 }
 
++ (UIViewController *)playbackControlsController {
+    DZSettingsViewController *vc = [[DZSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.pageTitle = @"Playback Controls";
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    UISheetPresentationController *sheet = nav.sheetPresentationController;
+    sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent, UISheetPresentationControllerDetent.largeDetent];
+    sheet.prefersGrabberVisible = YES;
+    // dragging the sliders must not drag the sheet
+    sheet.prefersScrollingExpandsWhenScrolledToEdge = NO;
+    return nav;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Deezit";
+    self.title = self.pageTitle ?: @"Deezit";
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                       target:self

@@ -48,7 +48,7 @@ static void probeAppeared(UIViewController *vc) {
 void DZProbesInstall(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        sWatch = [NSRegularExpression regularExpressionWithPattern:@"Player|Settings|Queue|Lyrics|NowPlaying|Cover"
+        sWatch = [NSRegularExpression regularExpressionWithPattern:@"Player|Settings|Queue|Lyrics|NowPlaying|Cover|BottomSheet"
                                                            options:NSRegularExpressionCaseInsensitive
                                                              error:nil];
         %init(DZProbeHooks);

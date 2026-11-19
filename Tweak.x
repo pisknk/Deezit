@@ -15,10 +15,12 @@
 #define DEEZIT_VERSION "dev"
 #endif
 
-void DZProbesInstall(void); // DZProbes.x
+void DZProbesInstall(void);     // DZProbes.x
+void DZPlayerMenuInstall(void); // DZPlayerMenu.x
 
 // Hooks live in their own files as %group blocks, each %init-ed by its
-// install function: audio in DZAudioHook.x, UI probes in DZProbes.x.
+// install function: audio in DZAudioHook.x, UI probes in DZProbes.x, the
+// player's ••• menu row in DZPlayerMenu.x.
 
 %ctor {
     @autoreleasepool {
@@ -31,6 +33,7 @@ void DZProbesInstall(void); // DZProbes.x
         DZPrefsBootstrap();
         DZAudioInstall();
         DZProbesInstall();
+        DZPlayerMenuInstall();
         DZSettingsEntryInstall();
     }
 }

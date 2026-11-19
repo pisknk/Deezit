@@ -260,6 +260,42 @@ root; whether Deezer ever connects `mainMixerNode → outputNode` itself or
 leaves it implicit; and how `CorePlayback.AudioEngineModifierNodes` (Deezer's
 own EQ/normalisation node chain, going by its name) sits in the graph.
 
+### Answered on device (Deezit 0.1.0+4, Deezer 11.27.0, iOS 27.0.1)
+
+From the debug-panel log (probes + engine graph dump):
+
+- **Full-screen player:** `DZRPlayerViewController` is the root, presented
+  modally by `Deezer.TabBarController`. It contains a `UINavigationController`
+  whose root is `DZRPlayerMainViewController`, which holds
+  `DZRPlayerCoverCollectionViewController` / `DZRPlayerOverlayViewController`
+  (cover area, 375x327) and pushes `Deezer.LyricsViewController`. The mini
+  player is `Deezer.MiniPlayerViewController` (333x48).
+- **Settings:** `Deezer.SettingsHostingController` appears at full height.
+- **Audio graph:** a single engine. The implicit `mainMixerNode → outputNode`
+  connection is the one spliced (at `start`, 44.1 kHz stereo):
+
+  ```
+  output <- Deezit reverb <- Deezit varispeed <- AVAudioMixerNode (main)
+           <- AVAudioUnitEQ "AUNBandEQ" <- AVAudioMixerNode
+              <- AVAudioPlayerNode (bus 0), AVAudioPlayerNode (bus 1)
+  attached: AVAudioMixerNode x2, AVAudioPlayerNode x5, AVAudioUnitEQ,
+            AVAudioUnitTimePitch "AUNewTimePitch", AVAudioOutputNode
+  ```
+
+  The two player nodes on the inner mixer fit the crossfade classes. The
+  TimePitch unit is attached but wasn't connected in the graphs seen.
+  Engines seen 1, splices 1, failures 0, and the effect is audible.
+
+### Player ••• menu
+
+Method lists (from `__objc_classlist`) of `DZRPlayerMainViewController` include
+`contextMenuButtonItem`, `displayContextMenu:`, `showContextMenuFor:` and
+`bottomSheetPresenter` (a `Deezer.BottomSheetPresenter`, with
+`present:from:detents:completion:`). The menu's rows are a SwiftUI sheet
+(`BusinessViews.TrackBottomSheet` and friends), so there's no UIKit data
+source to extend. `DZPlayerMenu.x` notes the ••• tap and adds a UIKit row
+under the sheet's list when that sheet is presented from the player.
+
 ## What each audio finding means for the hook
 
 v1 wants speed with pitch following (varispeed) plus reverb, at the audio

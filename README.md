@@ -21,7 +21,8 @@ generator (plain ObjC runtime).
 | Analysis of Deezer 11.27.0 | done: see [`docs/ANALYSIS.md`](docs/ANALYSIS.md) |
 | Settings page (switch, presets, sliders, reset) | done, saves prefs |
 | Prefs → realtime-safe audio params | done |
-| Audio hook | **AVAudioEngine backend written, not yet tested on a device**: varispeed + Apple Reverb2 spliced in front of Deezer's output node |
+| Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
+| ••• menu row | "Playback Controls" in the full-screen player's ••• menu (new, not yet tested on a device) |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -31,13 +32,16 @@ The audio hook has a kill switch: if playback breaks, open the debug panel,
 tap **⋯ → Turn audio hook off**, and relaunch Deezer. Deezit then leaves
 Deezer's audio completely alone.
 
-## Gestures
+## Opening the controls
 
-Anywhere in Deezer:
+**Full-screen player → ••• → Playback Controls** opens the slowed + reverb
+controls as a half-height sheet over the player.
+
+Gestures, anywhere in Deezer:
 
 | Gesture | Opens |
 |---|---|
-| **Three-finger hold** | Deezit settings (temporary: a button on Deezer's own Settings / player comes later) |
+| **Three-finger hold** | Deezit settings (same page, full height) |
 | **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
 
 The first launch of each Deezit version shows a short banner to confirm the
@@ -84,6 +88,7 @@ DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / 
 DZDSP.*                     engine-agnostic DSP core (C)
 DZAudioHook.x               AVAudioEngine backend: splices varispeed + reverb before the output node
 DZProbes.x                  runtime probes (which player / settings screens appear)
+DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
 DZSettingsViewController.*  settings page
 DZDebugViewController.*     debug panel + toast banner
 DZSettingsEntry.*           gestures that open the pages
