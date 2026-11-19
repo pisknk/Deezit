@@ -5,29 +5,44 @@
 //     > DZRPlayerMainViewController (ObjC)
 //   - DZRPlayerMainViewController has contextMenuButtonItem (the •••) and the
 //     ObjC methods displayContextMenu: / showContextMenuFor:
-//   - the menu itself is a SwiftUI bottom sheet (BusinessViews.TrackBottomSheet
-//     via Deezer.BottomSheetPresenter), so there is no UIKit data source to
-//     add a row to.
+//   - the menu is Deezer.BottomSheetNavigationViewController whose root is
+//     Deezer.TrackContextMenuController: a plain UIKit UITableView it feeds
+//     itself (ObjC-visible tableView:numberOfRowsInSection: /
+//     cellForRowAtIndexPath: / didSelectRowAtIndexPath:), one section, rows
+//     are Deezer.ContextMenuActionTableViewCell (40 pt, ObjC setters
+//     setActionText: / setActionImage: / setDisplaysChevron:).
 //
-// So: a ••• tap is noted, the sheet presented right after it from the player
-// is recognised in -presentViewController:animated:completion:, and a UIKit
-// row styled like Deezer's is placed directly under the sheet's last item
-// (inside its scroll view, so it scrolls with the list). Tapping it dismisses
-// the menu and opens Deezit's controls as a half-height sheet.
+// So: a ••• tap is noted, the menu presented right after it from the player
+// is recognised in -presentViewController:animated:completion: and flagged,
+// and its data source then reports one extra row: row 0 is Playback
+// Controls (one of Deezer's own cells), rows 1... are Deezer's rows shifted
+// back by one. Tapping it dismisses the menu and opens Deezit's controls as a
+// half-height sheet.
 //
-// If anything doesn't match (Deezer update, different sheet), nothing is
-// added and the reason is in the debug log.
+// Fallback, if TrackContextMenuController changes: a UIKit row styled like
+// Deezer's placed under the sheet's list (inside its scroll view). If nothing
+// matches at all, nothing is added and the reason is in the debug log.
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "DZLog.h"
 #import "DZSettingsViewController.h"
 
 @interface DZRPlayerMainViewController : UIViewController
 @end
+// placeholder for Deezer.TrackContextMenuController (a Swift class name with a
+// dot can't be written in %hook; %init binds it to the real class)
+@interface DZTrackMenu : UIViewController
+@end
 
 static CFTimeInterval sMenuTapAt;           // last ••• tap in the player
+static Class sTrackMenuClass;               // Deezer.TrackContextMenuController, if hookable
+static void *kDZMenuFlagKey = &kDZMenuFlagKey; // menu controller -> @YES: show our row first
+static void *kDZCellKey = &kDZCellKey;      // table -> our row-0 cell
+static UITableView *sFwdTable;              // set while Deezer builds a shifted row
+static NSIndexPath *sFwdRequested;          // the index path the table actually asked for
 static BOOL sDumpedHierarchy;               // one view dump per session
 static void *kDZRowKey = &kDZRowKey;        // sheet VC -> row, and scroll view -> row
 static void *kDZBaseInsetKey = &kDZBaseInsetKey;
@@ -195,18 +210,25 @@ static void placeRow(UIViewController *sheet, NSString *when) {
     DZLog("menu: no list scroll view found (%@), row pinned to the sheet bottom", when);
 }
 
+// Closes the ••• menu, then opens Deezit's controls over the player.
+static void openPlaybackControls(UIViewController *menu) {
+    UIViewController *sheet = menu.navigationController ?: menu;
+    while (sheet.parentViewController) sheet = sheet.parentViewController;
+    UIViewController *presenter = sheet.presentingViewController;
+    DZLog("menu: Playback Controls tapped");
+    [sheet dismissViewControllerAnimated:YES completion:^{
+        UIViewController *pc = [DZSettingsViewController playbackControlsController];
+        if (presenter.view.window) [presenter presentViewController:pc animated:YES completion:nil];
+    }];
+}
+
 static void attachRow(UIViewController *sheet) {
     if (objc_getAssociatedObject(sheet, kDZRowKey)) return;
     DZMenuRow *row = [[DZMenuRow alloc] initWithFrame:CGRectZero];
     __weak UIViewController *weakSheet = sheet;
     row.onTap = ^{
         UIViewController *s = weakSheet;
-        UIViewController *presenter = s.presentingViewController;
-        DZLog("menu: Playback Controls tapped");
-        [s dismissViewControllerAnimated:YES completion:^{
-            UIViewController *pc = [DZSettingsViewController playbackControlsController];
-            if (presenter.view.window) [presenter presentViewController:pc animated:YES completion:nil];
-        }];
+        if (s) openPlaybackControls(s);
     };
     objc_setAssociatedObject(sheet, kDZRowKey, row, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
@@ -225,7 +247,120 @@ static void attachRow(UIViewController *sheet) {
     });
 }
 
+#pragma mark - first row in Deezer's own menu table
+
+// Row 0 of the menu: one of Deezer's own ContextMenuActionTableViewCell, set up
+// through its ObjC setters so font, icon size and spacing match the other rows
+// exactly. Falls back to a plain cell holding DZMenuRow if that class changes.
+static UITableViewCell *playbackCell(UITableView *tv) {
+    UITableViewCell *cell = objc_getAssociatedObject(tv, kDZCellKey);
+    if (cell) return cell;
+    UIImage *icon = [[UIImage systemImageNamed:@"slider.horizontal.3"
+                             withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular]]
+                     imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    Class cls = NSClassFromString(@"Deezer.ContextMenuActionTableViewCell");
+    SEL setText = NSSelectorFromString(@"setActionText:");
+    SEL setImage = NSSelectorFromString(@"setActionImage:");
+    SEL setChevron = NSSelectorFromString(@"setDisplaysChevron:");
+    if (cls && [cls isSubclassOfClass:[UITableViewCell class]] &&
+        [cls instancesRespondToSelector:setText] && [cls instancesRespondToSelector:setImage]) {
+        @try {
+            cell = [[cls alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"DeezitPlaybackControls"];
+            ((void (*)(id, SEL, id))objc_msgSend)(cell, setText, @"Playback Controls");
+            ((void (*)(id, SEL, id))objc_msgSend)(cell, setImage, icon);
+            if ([cell respondsToSelector:setChevron]) ((void (*)(id, SEL, BOOL))objc_msgSend)(cell, setChevron, NO);
+        } @catch (NSException *ex) {
+            DZLog("menu: Deezer's menu cell refused setup (%@), using Deezit's own", ex.reason);
+            cell = nil;
+        }
+    }
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"DeezitPlaybackControls"];
+        cell.backgroundColor = UIColor.clearColor;
+        DZMenuRow *row = [[DZMenuRow alloc] initWithFrame:CGRectZero];
+        row.userInteractionEnabled = NO;   // the table handles the tap
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:row];
+        [NSLayoutConstraint activateConstraints:@[
+            [row.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor],
+            [row.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor],
+            [row.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor],
+            [row.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor],
+            [row.heightAnchor constraintEqualToConstant:40],
+        ]];
+    }
+    cell.accessibilityLabel = @"Playback Controls";
+    objc_setAssociatedObject(tv, kDZCellKey, cell, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return cell;
+}
+
+static BOOL showsOurRow(id menu) {
+    return objc_getAssociatedObject(menu, kDZMenuFlagKey) != nil;
+}
+
+static NSIndexPath *deezerPath(NSIndexPath *ip) {
+    return [NSIndexPath indexPathForRow:ip.row - 1 inSection:ip.section];
+}
+
 #pragma mark - hooks
+
+// Deezer's menu table, only for menus opened from the player's •••: one extra
+// row at the top; every other row is handed to Deezer shifted back by one, so
+// its actions still map to the right rows.
+%group DZTrackMenuHooks
+
+%hook DZTrackMenu
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    NSInteger n = %orig;
+    return (section == 0 && showsOurRow(self)) ? n + 1 : n;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section != 0 || !showsOurRow(self)) return %orig;
+    if (ip.row == 0) return playbackCell(tv);
+    UITableView *prevTable = sFwdTable;
+    NSIndexPath *prevPath = sFwdRequested;
+    sFwdTable = tv;
+    sFwdRequested = ip;
+    UITableViewCell *cell = %orig(tv, deezerPath(ip));
+    sFwdTable = prevTable;
+    sFwdRequested = prevPath;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section != 0 || !showsOurRow(self)) {
+        %orig;
+        return;
+    }
+    if (ip.row == 0) {
+        [tv deselectRowAtIndexPath:ip animated:YES];
+        openPlaybackControls(self);
+        return;
+    }
+    %orig(tv, deezerPath(ip));
+    // Deezer deselects the path it was given, i.e. the row above the tapped one
+    [tv deselectRowAtIndexPath:ip animated:YES];
+}
+
+%end
+
+%hook UITableView
+
+// While Deezer builds a shifted row it dequeues for its own (shifted) index
+// path; hand UIKit the path it actually asked for.
+- (UITableViewCell *)dequeueReusableCellWithIdentifier:(NSString *)identifier forIndexPath:(NSIndexPath *)ip {
+    if (self == sFwdTable && sFwdRequested && ip.section == sFwdRequested.section &&
+        ip.row == sFwdRequested.row - 1) {
+        return %orig(identifier, sFwdRequested);
+    }
+    return %orig;
+}
+
+%end
+
+%end
 
 %group DZPlayerMenuTapHooks
 
@@ -266,6 +401,27 @@ static void attachRow(UIViewController *sheet) {
         return;
     }
     sMenuTapAt = 0;
+
+    // Deezer's track menu: make Playback Controls its first row
+    UIViewController *root = [vc isKindOfClass:[UINavigationController class]]
+        ? ((UINavigationController *)vc).viewControllers.firstObject : vc;
+    if (sTrackMenuClass && [root isKindOfClass:sTrackMenuClass]) {
+        objc_setAssociatedObject(root, kDZMenuFlagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (root.isViewLoaded) {
+            // its table may already have loaded without our row
+            @try {
+                id tv = [root valueForKey:@"tableView"];
+                if ([tv isKindOfClass:[UITableView class]]) [(UITableView *)tv reloadData];
+            } @catch (NSException *ex) {
+                DZLog("menu: couldn't reload the menu table: %@", ex.reason);
+            }
+        }
+        DZLog("menu: Playback Controls added as the first option");
+        %orig;
+        return;
+    }
+
+    // any other sheet: fall back to a row under its list
     __weak UIViewController *weakVC = vc;
     void (^wrapped)(void) = ^{
         if (completion) completion();
@@ -299,6 +455,24 @@ void DZPlayerMenuInstall(void) {
         }
         %init(DZPlayerMenuTapHooks);
         %init(DZPlayerMenuPresentHooks);
-        DZLog("menu: Playback Controls row armed for the player's ••• menu");
+
+        // Swift class: the runtime resolves the dotted name; the mangled one is the fallback
+        Class menu = NSClassFromString(@"Deezer.TrackContextMenuController")
+                     ?: objc_getClass("_TtC6Deezer26TrackContextMenuController");
+        SEL need[] = { @selector(tableView:numberOfRowsInSection:), @selector(tableView:cellForRowAtIndexPath:),
+                       @selector(tableView:didSelectRowAtIndexPath:) };
+        BOOL ok = menu != Nil;
+        for (size_t i = 0; ok && i < sizeof(need) / sizeof(need[0]); i++) {
+            // must be implemented by the class itself, not inherited
+            Method m = class_getInstanceMethod(menu, need[i]);
+            ok = m && class_getInstanceMethod(class_getSuperclass(menu), need[i]) != m;
+        }
+        if (ok) {
+            sTrackMenuClass = menu;
+            %init(DZTrackMenuHooks, DZTrackMenu = menu);
+            DZLog("menu: Playback Controls will be the first option of the player's ••• menu");
+        } else {
+            DZLog("menu: Deezer.TrackContextMenuController not as expected, Playback Controls goes under the menu instead");
+        }
     });
 }

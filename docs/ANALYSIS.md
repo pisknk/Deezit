@@ -291,10 +291,25 @@ From the debug-panel log (probes + engine graph dump):
 Method lists (from `__objc_classlist`) of `DZRPlayerMainViewController` include
 `contextMenuButtonItem`, `displayContextMenu:`, `showContextMenuFor:` and
 `bottomSheetPresenter` (a `Deezer.BottomSheetPresenter`, with
-`present:from:detents:completion:`). The menu's rows are a SwiftUI sheet
-(`BusinessViews.TrackBottomSheet` and friends), so there's no UIKit data
-source to extend. `DZPlayerMenu.x` notes the ••• tap and adds a UIKit row
-under the sheet's list when that sheet is presented from the player.
+`present:from:detents:completion:`).
+
+On device (Deezit 0.1.0+5) the menu turned out to be **UIKit, not SwiftUI**:
+`Deezer.BottomSheetNavigationViewController` whose root is
+`Deezer.TrackContextMenuController : UIViewController`. It has a title area
+(two `UILabel`s) above a `UITableView` (40 pt
+`Deezer.ContextMenuActionTableViewCell` rows; "Create a group on Shaker" is a
+SwiftUI-hosting cell, `AddTrackToMusicTogetherGroupHostingTableViewCell`).
+The controller's ObjC method list has the table data source/delegate
+(`tableView:numberOfRowsInSection:`, `tableView:cellForRowAtIndexPath:`,
+`tableView:didSelectRowAtIndexPath:`, no `numberOfSectionsInTableView:`, so
+one section) and a `collectionView` data source for the artists row. The cell
+class exposes `setActionText:`, `setActionImage:`, `setActionIllustrable:` and
+`setDisplaysChevron:`.
+
+`DZPlayerMenu.x` flags the menu opened from the player's ••• and adds one row
+at index 0 through those data-source methods (Deezer's rows are passed
+through shifted by one). Row 0 is a real `ContextMenuActionTableViewCell` set up
+through its setters, so it matches the other rows.
 
 ## What each audio finding means for the hook
 

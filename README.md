@@ -22,7 +22,7 @@ generator (plain ObjC runtime).
 | Settings page (switch, presets, sliders, reset) | done, saves prefs |
 | Prefs → realtime-safe audio params | done |
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
-| ••• menu row | "Playback Controls" in the full-screen player's ••• menu (new, not yet tested on a device) |
+| ••• menu row | "Playback Controls" as the first option of the full-screen player's ••• menu (the bottom-of-menu version works on device; first-row version new, not yet tested) |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
