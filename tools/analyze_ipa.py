@@ -149,6 +149,7 @@ class MachO:
         self.base = 0  # __TEXT vmaddr
         self._class_cache = {}
         self.classic_binds = {}  # vmaddr -> symbol (LC_DYLD_INFO opcodes)
+        self.swift_supers = {}  # Swift class path -> superclass path (from descriptors)
         self._parse()
 
     # -- slices --
@@ -423,7 +424,10 @@ class MachO:
 
     def objc_class_names(self):
         names = [n for n, _s in self.objc_classes()]
-        names += cstrings(self.section("__TEXT", "__objc_classname"))
+        # __objc_classname also stores ivar-layout byte strings (\x01\x11...),
+        # so keep only identifier-like entries
+        names += [n for n in cstrings(self.section("__TEXT", "__objc_classname"))
+                  if re.match(r"^[A-Za-z_$][\w.$]*$", n)]
         return list(dict.fromkeys(demangle_objc_swift(n) for n in names))
 
     def objc_selectors(self):
@@ -432,43 +436,157 @@ class MachO:
     def cstring_pool(self):
         return cstrings(self.section("__TEXT", "__cstring"))
 
+    SWIFT_KINDS = {0: "module", 1: "extension", 2: "anonymous", 16: "class",
+                   17: "struct", 18: "enum"}
+
     def swift_types(self):
-        """Nominal Swift types from __swift5_types: [(kind, 'Module.Outer.Name')]."""
-        s = self.sections.get(("__TEXT", "__swift5_types"))
-        if not s:
-            return []
-        addr, off, size = s
+        """Nominal Swift types from __swift5_types(2): [(kind, 'Module.Outer.Name')]."""
         out = []
-        for i in range(0, size, 4):
-            rel = struct.unpack_from("<i", self.data, off + i)[0]
-            if rel & 1:  # indirect - points at a GOT slot, skip
+        # __swift5_types2 holds extra descriptors newer toolchains split out
+        for sect in ("__swift5_types", "__swift5_types2"):
+            s = self.sections.get(("__TEXT", sect))
+            if not s:
                 continue
-            desc = addr + i + rel
-            name = self._descriptor_path(desc)
-            if name:
-                out.append(name)
+            addr, off, size = s
+            for i in range(0, size - 3, 4):
+                rel = struct.unpack_from("<i", self.data, off + i)[0]
+                tgt = self._rel_target(addr + i, rel)
+                if not tgt or tgt[0] != "local":
+                    continue
+                do = self.vm_to_off(tgt[1])
+                if do is None or do + 4 > len(self.data):
+                    continue
+                kind = self.SWIFT_KINDS.get(struct.unpack_from("<I", self.data, do)[0] & 0x1F)
+                if kind not in ("class", "struct", "enum"):
+                    continue
+                path = self._context_path(tgt[1])
+                if path:
+                    out.append((kind, path))
+                    if kind == "class":
+                        sup = self._swift_superclass(tgt[1], do)
+                        if sup:
+                            self.swift_supers[path] = sup
         return out
 
-    def _descriptor_path(self, desc, depth=0):
+    def _swift_superclass(self, desc, do):
+        """Superclass recorded in a Swift class descriptor (offset 20, a relative
+        pointer to a mangled type name). Generic arguments are dropped, so
+        `UIHostingController<Foo>` comes back as `SwiftUI.UIHostingController`.
+        This covers classes with no static ObjC class object (generic superclass)."""
+        if do + 24 > len(self.data):
+            return None
+        rel = struct.unpack_from("<i", self.data, do + 20)[0]
+        if not rel:
+            return None
+        return self._symbolic_ref_path(desc + 20 + rel, 0)
+
+    def _rel_target(self, field, rel):
+        """Resolve a Swift relative pointer that may be indirect (low bit set).
+        -> ('local', vmaddr) | ('external', 'Module.Name') | None"""
+        if not rel & 1:
+            return ("local", field + rel)
+        return self._indirect_target(field + (rel & ~1))
+
+    def _indirect_target(self, slot):
+        """Follow a pointer slot (GOT entry) to a local descriptor or an import."""
+        p = self._read_ptr_at_vm(slot)
+        if not p:
+            return None
+        if p[0] == "rebase":
+            return ("local", p[1])
+        sym = p[1] if p[0] == "symbol" else (
+            self.imports_ordered[p[1]] if p[1] < len(self.imports_ordered) else None)
+        path = swift_symbol_path(sym) if sym else None
+        return ("external", path) if path else None
+
+    def _symbolic_ref_path(self, addr, depth):
+        """Path of a mangled name that starts with a symbolic reference
+        (\\x01 direct / \\x02 indirect to a context descriptor), else None."""
+        o = self.vm_to_off(addr)
+        if o is None or o + 5 > len(self.data):
+            return None
+        tag = self.data[o]
+        if tag not in (1, 2):
+            return swift_symbol_path(cstr(self.data, o, min(o + 256, len(self.data))))
+        rel = struct.unpack_from("<i", self.data, o + 1)[0]
+        # \x01: rel32 straight to the descriptor; \x02: rel32 to a pointer slot
+        tgt = ("local", addr + 1 + rel) if tag == 1 else self._indirect_target(addr + 1 + rel)
+        if not tgt:
+            return None
+        if tgt[0] == "external":
+            return tgt[1]
+        return self._context_path(tgt[1], depth + 1)
+
+    def _context_path(self, desc, depth=0):
+        """Dotted path of any context descriptor. Anonymous (private/fileprivate)
+        contexts are transparent; an extension resolves to the type it extends."""
+        if depth > 12:
+            return None
+        key = ("ctx", desc)
+        if key in self._class_cache:
+            return self._class_cache[key]
+        self._class_cache[key] = None  # cycle guard
         do = self.vm_to_off(desc)
         if do is None or do + 12 > len(self.data):
             return None
         flags, prel, nrel = struct.unpack_from("<Iii", self.data, do)
-        kind = flags & 0x1F
-        name_off = self.vm_to_off(desc + 8 + nrel)
-        if name_off is None:
+        kind = self.SWIFT_KINDS.get(flags & 0x1F)
+        if kind is None:
             return None
-        name = cstr(self.data, name_off, min(name_off + 256, len(self.data)))
-        kinds = {0: "module", 1: "extension", 2: "anonymous", 16: "class",
-                 17: "struct", 18: "enum"}
-        if kind not in kinds:
+        parent = None
+        if prel:
+            pt = self._rel_target(desc + 4, prel)
+            if pt and pt[0] == "external":
+                parent = pt[1]
+            elif pt:
+                parent = self._context_path(pt[1], depth + 1)
+        if kind == "anonymous":
+            path = parent
+        elif kind == "extension":
+            path = self._symbolic_ref_path(desc + 8 + nrel, depth) or parent
+        else:
+            name_off = self.vm_to_off(desc + 8 + nrel)
+            if name_off is None:
+                return None
+            name = cstr(self.data, name_off, min(name_off + 256, len(self.data)))
+            if not name or not name.isprintable():
+                return None
+            path = name if kind == "module" or not parent else parent + "." + name
+        self._class_cache[key] = path
+        return path
+
+
+def swift_symbol_path(sym):
+    """Rough path of a simple Swift mangled type name or descriptor symbol:
+    _$s10Foundation3URLVMn -> Foundation.URL, $sSo8NSObjectC -> __C.NSObject.
+    Returns None for anything it can't read (generics, words substitutions)."""
+    m = re.match(r"^_?\$s(.*)$", sym or "")
+    rest = m.group(1) if m else (sym or "")
+    if not re.match(r"^(So\d|s\d|[1-9])", rest):
+        return None
+    parts = []
+    objc = rest.startswith("So")
+    if objc:  # imported ObjC/C type: show the bare name (UIViewController)
+        rest = rest[2:]
+    elif rest.startswith("s") and rest[1:2].isdigit():  # stdlib module
+        parts.append("Swift")
+        rest = rest[1:]
+    while rest:
+        n = re.match(r"^(\d+)", rest)
+        if not n:
+            break
+        ln = int(n.group(1))
+        rest = rest[len(n.group(1)):]
+        if len(rest) < ln:
             return None
-        if kind == 0 or depth > 6 or prel == 0 or (prel & 1):
-            return (kinds[kind], name)
-        parent = self._descriptor_path(desc + 4 + prel, depth + 1)
-        if parent and parent[0] not in ("extension", "anonymous"):
-            return (kinds[kind], parent[1] + "." + name)
-        return (kinds[kind], name)
+        parts.append(rest[:ln])
+        rest = rest[ln:]
+        # skip the kind letter between nested components (C/V/O/P)
+        if rest[:1] in ("C", "V", "O", "P") and rest[1:2].isdigit():
+            rest = rest[1:]
+    if not parts or (not objc and len(parts) < 2):
+        return None
+    return ".".join(parts)
 
 
 def demangle_objc_swift(name):
@@ -503,6 +621,8 @@ AUDIO_PATHS = {
     ],
     "AudioQueue": [
         "_AudioQueueNewOutput", "_AudioQueueNewOutputWithDispatchQueue",
+        # NewInput = a recording queue; without NewOutput the queue is input-only
+        "_AudioQueueNewInput", "_AudioQueueNewInputWithDispatchQueue",
         "_AudioQueueEnqueueBuffer", "_AudioQueueStart", "_AudioQueueAllocateBuffer",
     ],
     "AVAudioEngine": [
@@ -510,12 +630,14 @@ AUDIO_PATHS = {
         "_OBJC_CLASS_$_AVAudioSourceNode", "_OBJC_CLASS_$_AVAudioSinkNode",
         "_OBJC_CLASS_$_AVAudioUnitTimePitch", "_OBJC_CLASS_$_AVAudioUnitVarispeed",
         "_OBJC_CLASS_$_AVAudioUnitReverb", "_OBJC_CLASS_$_AVAudioUnitEQ",
-        "_OBJC_CLASS_$_AVAudioMixerNode",
+        "_OBJC_CLASS_$_AVAudioMixerNode", "_OBJC_CLASS_$_AVAudioPCMBuffer",
+        "_AVAudioEngineConfigurationChangeNotification",
     ],
     "AVPlayer": [
         "_OBJC_CLASS_$_AVPlayer", "_OBJC_CLASS_$_AVQueuePlayer",
         "_OBJC_CLASS_$_AVPlayerItem", "_OBJC_CLASS_$_AVURLAsset",
         "_OBJC_CLASS_$_AVMutableAudioMix", "_MTAudioProcessingTapCreate",
+        "_OBJC_CLASS_$_AVPlayerLayer",
         "_AVAudioTimePitchAlgorithmVarispeed", "_AVAudioTimePitchAlgorithmSpectral",
     ],
     "AVSampleBufferAudioRenderer": [
@@ -523,8 +645,10 @@ AUDIO_PATHS = {
         "_OBJC_CLASS_$_AVSampleBufferRenderSynchronizer",
     ],
     "Decoding / conversion": [
-        "_AudioConverterNew", "_AudioConverterFillComplexBuffer",
-        "_ExtAudioFileOpenURL", "_AudioFileStreamOpen", "_AudioFileOpenWithCallbacks",
+        "_AudioConverterNew", "_AudioConverterFillComplexBuffer", "_AudioConverterSetProperty",
+        "_ExtAudioFileOpenURL", "_ExtAudioFileWrapAudioFileID", "_ExtAudioFileRead",
+        "_AudioFileStreamOpen", "_AudioFileStreamParseBytes", "_AudioFileOpenWithCallbacks",
+        "_OBJC_CLASS_$_AVAudioConverter", "_OBJC_CLASS_$_AVAssetReader",
         "_CMAudioSampleBufferCreateWithPacketDescriptions",
     ],
     "Audio session": [
@@ -555,6 +679,14 @@ AUDIO_SELECTOR_HINTS = [
     "setAudioMix:", "attachNode:", "connect:to:format:", "renderCallback",
     "enqueueSampleBuffer:", "setPlaybackRate:", "playbackRate", "setSpeed:",
     "playbackSpeed", "setPlaybackSpeed:",
+    # AVAudioEngine graph building / scheduling
+    "detachNode:", "connect:to:fromBus:toBus:format:", "disconnectNodeInput:",
+    "mainMixerNode", "outputNode", "startAndReturnError:",
+    "scheduleBuffer:completionHandler:", "scheduleBuffer:atTime:options:completionHandler:",
+    "scheduleBuffer:completionCallbackType:completionHandler:",
+    "scheduleFile:atTime:completionHandler:", "scheduleSegment:startingFrame:frameCount:atTime:completionHandler:",
+    "installTapOnBus:bufferSize:format:block:", "setPitch:", "pitch",
+    "setManualRenderingMode:", "enableManualRenderingMode:format:maximumFrameCount:error:",
 ]
 
 RN_CLASSES = ["RCTBridge", "RCTRootView", "RCTSurfaceHostingView", "RCTAppDelegate",
@@ -658,6 +790,11 @@ def analyse(path, classes_out=None):
             if sup:
                 supers[c] = sup
         swift_types[rel] = m.swift_types()
+    # Swift descriptors fill in classes the ObjC walk can't resolve (generic
+    # superclasses, Swift-only classes); the ObjC chain wins where both exist
+    for rel, (kind, m) in parsed.items():
+        for c, sup in m.swift_supers.items():
+            supers.setdefault(c, sup)
 
     def ancestry(c):
         chain, seen = [], set()
@@ -756,10 +893,18 @@ def analyse(path, classes_out=None):
     # ---------------- interesting classes ----------------
     w("## Player / Now Playing / artwork / settings candidates")
     w("")
+    # generated GraphQL / analytics-schema types and Codable keys match the
+    # keywords by the hundred but are never UI or audio; they stay in --classes
+    noise = re.compile(r"(^(ApolloGenerated|TrackingPlan|XPlayerApollo)|\.CodingKeys$)")
+    w("Generated `ApolloGenerated.*` / `TrackingPlan.*` / `XPlayerApollo*` types and "
+      "`CodingKeys` are left out here; the `--classes` dump has everything.")
+    w("")
+    cap = 1500
     for rel in all_classes:
-        hits = sorted({c for c in all_classes[rel] if UI_KEYWORDS.search(c)})
-        sw = sorted({n for _k, n in swift_types.get(rel, []) if UI_KEYWORDS.search(n)})
-        sw = [n for n in sw if n not in hits]
+        hits = sorted({c for c in all_classes[rel] if UI_KEYWORDS.search(c) and not noise.search(c)})
+        sw = sorted({n for _k, n in swift_types.get(rel, [])
+                     if UI_KEYWORDS.search(n) and not noise.search(n)})
+        sw = [n for n in sw if n not in set(hits)]
         if not hits and not sw:
             continue
         w("### `%s`" % rel)
@@ -768,18 +913,18 @@ def analyse(path, classes_out=None):
             w("ObjC-visible classes (%d):" % len(hits))
             w("")
             w("```")
-            w("\n".join(label(c) for c in hits[:400]))
-            if len(hits) > 400:
-                w("... %d more (see --classes output)" % (len(hits) - 400))
+            w("\n".join(label(c) for c in hits[:cap]))
+            if len(hits) > cap:
+                w("... %d more (see --classes output)" % (len(hits) - cap))
             w("```")
             w("")
         if sw:
             w("Swift-only nominal types (%d):" % len(sw))
             w("")
             w("```")
-            w("\n".join(sw[:300]))
-            if len(sw) > 300:
-                w("... %d more" % (len(sw) - 300))
+            w("\n".join(label(n) for n in sw[:cap]))
+            if len(sw) > cap:
+                w("... %d more (see --classes output)" % (len(sw) - cap))
             w("```")
             w("")
 
@@ -832,7 +977,7 @@ def analyse(path, classes_out=None):
                     fh.write(label(c) + "\n")
                 fh.write("\n## %s (Swift nominal types)\n" % rel)
                 for k, n in sorted(set(swift_types.get(rel, [])), key=lambda t: t[1]):
-                    fh.write("%s %s\n" % (k, n))
+                    fh.write("%s %s\n" % (k, label(n) if k == "class" else n))
                 fh.write("\n")
 
     return "\n".join(lines) + "\n"
