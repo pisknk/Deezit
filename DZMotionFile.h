@@ -11,6 +11,11 @@ NS_ASSUME_NONNULL_BEGIN
 // Concurrent requests for the same name share one download.
 void DZMotionFile(NSURL *master, NSString *name, void (^done)(NSURL * _Nullable file, NSString *note));
 
+// Same, for a square (1:1) motion cover the lock screen wants as 3:4: the
+// square clip is downloaded, centre-cropped to 3:4 once (HEVC re-encode) and
+// cached as <name>.mp4; the square download is then deleted.
+void DZMotionFileSquareTo3x4(NSURL *master, NSString *name, void (^done)(NSURL * _Nullable file, NSString *note));
+
 // First frame of the clip, for the still the lock screen shows before / around it.
 void DZMotionPreview(NSURL *file, CGSize size, void (^done)(UIImage * _Nullable image));
 

@@ -228,6 +228,66 @@ void DZMotionFile(NSURL *master, NSString *name, void (^done)(NSURL *file, NSStr
     });
 }
 
+// Centre-crops a square clip to 3:4 (full height, sides trimmed).
+static void cropTo3x4(NSURL *src, NSURL *dest, void (^done)(BOOL ok, NSString *note)) {
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:src options:nil];
+    [asset loadTracksWithMediaType:AVMediaTypeVideo completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *err) {
+        AVAssetTrack *track = tracks.firstObject;
+        if (!track) { done(NO, [NSString stringWithFormat:@"no video track (%@)", err.localizedDescription ?: @"?"]); return; }
+        CGSize size = track.naturalSize;
+        CGFloat height = floor(size.height / 2) * 2;
+        CGFloat width = floor(height * 3.0 / 4.0 / 2) * 2;
+        if (size.width < width || height < 2) { done(NO, @"clip too small to crop"); return; }
+        float fps = track.nominalFrameRate > 1 ? track.nominalFrameRate : 30;
+
+        AVMutableVideoCompositionLayerInstruction *layer =
+            [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
+        [layer setTransform:CGAffineTransformConcat(track.preferredTransform,
+                                                    CGAffineTransformMakeTranslation(-(size.width - width) / 2, 0))
+                     atTime:kCMTimeZero];
+        AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+        instruction.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+        instruction.layerInstructions = @[layer];
+        AVMutableVideoComposition *composition = [AVMutableVideoComposition videoComposition];
+        composition.renderSize = CGSizeMake(width, height);
+        composition.frameDuration = CMTimeMake(1, (int32_t)lroundf(fps));
+        composition.instructions = @[instruction];
+
+        AVAssetExportSession *export = [AVAssetExportSession exportSessionWithAsset:asset presetName:AVAssetExportPresetHEVCHighestQuality];
+        if (!export) { done(NO, @"no HEVC export session"); return; }
+        NSURL *partial = [dest URLByAppendingPathExtension:@"part.mp4"];
+        [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
+        export.videoComposition = composition;
+        export.outputURL = partial;
+        export.outputFileType = AVFileTypeMPEG4;
+        [export exportAsynchronouslyWithCompletionHandler:^{
+            BOOL ok = export.status == AVAssetExportSessionStatusCompleted &&
+                      [NSFileManager.defaultManager moveItemAtURL:partial toURL:dest error:nil];
+            if (!ok) [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
+            done(ok, ok ? [NSString stringWithFormat:@"cropped %.0fx%.0f -> %.0fx%.0f", size.width, size.height, width, height]
+                        : [NSString stringWithFormat:@"crop failed: %@", export.error.localizedDescription ?: @"?"]);
+        }];
+    }];
+}
+
+void DZMotionFileSquareTo3x4(NSURL *master, NSString *name, void (^done)(NSURL *file, NSString *note)) {
+    NSString *safe = [[name componentsSeparatedByCharactersInSet:NSCharacterSet.alphanumericCharacterSet.invertedSet]
+                      componentsJoinedByString:@"-"];
+    NSURL *dest = [cacheDir() URLByAppendingPathComponent:[safe stringByAppendingPathExtension:@"mp4"]];
+    if ([NSFileManager.defaultManager fileExistsAtPath:dest.path]) {
+        [NSFileManager.defaultManager setAttributes:@{ NSFileModificationDate: NSDate.date } ofItemAtPath:dest.path error:nil];
+        done(dest, @"cached");
+        return;
+    }
+    DZMotionFile(master, [safe stringByAppendingString:@"-square"], ^(NSURL *square, NSString *note) {
+        if (!square) { done(nil, note); return; }
+        cropTo3x4(square, dest, ^(BOOL ok, NSString *cropNote) {
+            [NSFileManager.defaultManager removeItemAtURL:square error:nil];
+            done(ok ? dest : nil, [NSString stringWithFormat:@"%@, %@", note, cropNote]);
+        });
+    });
+}
+
 void DZMotionPreview(NSURL *file, CGSize size, void (^done)(UIImage *image)) {
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:file options:nil];
     AVAssetImageGenerator *gen = [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];

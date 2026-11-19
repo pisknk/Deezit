@@ -16,7 +16,15 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^DZMotionCoverResult)(NSString * _Nullable albumID, NSURL * _Nullable tall,
                                     NSURL * _Nullable square, NSString *note);
 
+// `albumID` is nil only when no album matched or the catalog couldn't be asked
+// (worth retrying later); an album without a motion cover comes back with its
+// ID and both URLs nil.
 void DZAppleMotionCover(NSString *title, NSString *artist, NSString * _Nullable album,
                         NSTimeInterval duration, DZMotionCoverResult done);
+
+// Fallback when the album has no motion cover: other releases of the same
+// song (singles first, up to four), the first one with a motion cover.
+void DZAppleMotionCoverFromOtherReleases(NSString *title, NSString *artist, NSString * _Nullable excludeAlbumID,
+                                         NSTimeInterval duration, DZMotionCoverResult done);
 
 NS_ASSUME_NONNULL_END

@@ -81,6 +81,8 @@ static DZNodeStats *statsFor(AVAudioPlayerNode *node) {
         if (!s) {
             s = [DZNodeStats new];
             s.serial = ++sNodes;
+            // a node can be scheduled before its first play: start the clock now
+            s.sessionStart = s.lastSummary = CACurrentMediaTime();
             [s resetWindow];
             objc_setAssociatedObject(node, kDZStatsKey, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
@@ -242,8 +244,11 @@ static AVAudioPlayerNodeCompletionHandler wrapTyped(AVAudioPlayerNode *node, AVA
 
 - (void)stop {
     DZNodeStats *s = statsFor(self);
-    DZLog("buffer probe: player #%lu stop (had %.2f s queued)", (unsigned long)s.serial,
-          s.sampleRate > 0 ? atomic_load(&s->outstandingFrames) / s.sampleRate : 0.0);
+    long long queued = atomic_load(&s->outstandingFrames);
+    // Deezer stops idle nodes constantly; only stops that drop audio are interesting
+    if (queued > 0 && s.sampleRate > 0) {
+        DZLog("buffer probe: player #%lu stop (had %.2f s queued)", (unsigned long)s.serial, queued / s.sampleRate);
+    }
     %orig;
 }
 

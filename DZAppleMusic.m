@@ -324,24 +324,78 @@ static NSURL *videoIn(NSDictionary *editorial, NSArray<NSString *> *keys) {
     return nil;
 }
 
+// The album's motion covers. `ok` is NO when the catalog couldn't be asked
+// (token / network), so the caller retries later instead of concluding there
+// is no cover.
+static void editorialFor(NSString *albumID, void (^done)(BOOL ok, NSURL *tall, NSURL *square, NSString *what)) {
+    catalogGet([NSString stringWithFormat:@"albums/%@?extend=editorialVideo", albumID], NO, ^(NSData *data, NSInteger status) {
+        if (status != 200) { done(NO, nil, nil, [NSString stringWithFormat:@"catalog HTTP %ld", (long)status]); return; }
+        NSDictionary *json = jsonObject(data);
+        NSArray *items = [json isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
+        NSDictionary *first = [items isKindOfClass:[NSArray class]] && items.count ? items.firstObject : nil;
+        NSDictionary *attrs = [first isKindOfClass:[NSDictionary class]] ? first[@"attributes"] : nil;
+        NSDictionary *ev = [attrs isKindOfClass:[NSDictionary class]] ? attrs[@"editorialVideo"] : nil;
+        if (![ev isKindOfClass:[NSDictionary class]]) { done(YES, nil, nil, @"no motion cover"); return; }
+        NSURL *tall = videoIn(ev, @[@"motionDetailTall", @"motionTallVideo3x4"]);
+        NSURL *square = videoIn(ev, @[@"motionDetailSquare", @"motionSquareVideo1x1"]);
+        done(YES, tall, square, [NSString stringWithFormat:@"tall %@, square %@", tall ? @"yes" : @"no", square ? @"yes" : @"no"]);
+    });
+}
+
 void DZAppleMotionCover(NSString *title, NSString *artist, NSString *album, NSTimeInterval duration, DZMotionCoverResult done) {
     matchAlbum(title, artist, album ?: @"", duration, ^(NSString *albumID, NSString *matchNote) {
         if (!albumID.length) { done(nil, nil, nil, matchNote); return; }
-        catalogGet([NSString stringWithFormat:@"albums/%@?extend=editorialVideo", albumID], NO, ^(NSData *data, NSInteger status) {
-            NSDictionary *json = jsonObject(data);
-            NSArray *items = [json isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
-            NSDictionary *first = [items isKindOfClass:[NSArray class]] && items.count ? items.firstObject : nil;
-            NSDictionary *attrs = [first isKindOfClass:[NSDictionary class]] ? first[@"attributes"] : nil;
-            NSDictionary *ev = [attrs isKindOfClass:[NSDictionary class]] ? attrs[@"editorialVideo"] : nil;
-            if (![ev isKindOfClass:[NSDictionary class]]) {
-                done(albumID, nil, nil, [NSString stringWithFormat:@"%@; album %@: %@", matchNote, albumID,
-                     status == 200 ? @"no motion cover" : [NSString stringWithFormat:@"catalog HTTP %ld", (long)status]]);
-                return;
-            }
-            NSURL *tall = videoIn(ev, @[@"motionDetailTall", @"motionTallVideo3x4"]);
-            NSURL *square = videoIn(ev, @[@"motionDetailSquare", @"motionSquareVideo1x1"]);
-            done(albumID, tall, square, [NSString stringWithFormat:@"%@; album %@: tall %@, square %@", matchNote, albumID,
-                                         tall ? @"yes" : @"no", square ? @"yes" : @"no"]);
+        editorialFor(albumID, ^(BOOL ok, NSURL *tall, NSURL *square, NSString *what) {
+            done(ok ? albumID : nil, tall, square, [NSString stringWithFormat:@"%@; album %@: %@", matchNote, albumID, what]);
         });
+    });
+}
+
+// Tries the candidates in order until one has a motion cover.
+static void firstWithMotion(NSArray<NSDictionary *> *candidates, NSUInteger i, NSMutableArray *tried, DZMotionCoverResult done) {
+    if (i >= candidates.count) {
+        done(nil, nil, nil, tried.count ? [NSString stringWithFormat:@"no other release with a motion cover (checked %@)",
+                                           [tried componentsJoinedByString:@", "]]
+                                        : @"no other release of this song found");
+        return;
+    }
+    NSDictionary *c = candidates[i];
+    NSString *albumID = [c[@"collectionId"] description];
+    editorialFor(albumID, ^(BOOL ok, NSURL *tall, NSURL *square, NSString *what) {
+        [tried addObject:[NSString stringWithFormat:@"\"%@\" %@", c[@"collectionName"], what]];
+        if (tall || square) {
+            done(albumID, tall, square, [NSString stringWithFormat:@"other release \"%@\" (%@): %@",
+                                         c[@"collectionName"], albumID, what]);
+            return;
+        }
+        firstWithMotion(candidates, i + 1, tried, done);
+    });
+}
+
+void DZAppleMotionCoverFromOtherReleases(NSString *title, NSString *artist, NSString *excludeAlbumID,
+                                         NSTimeInterval duration, DZMotionCoverResult done) {
+    NSString *primary = primaryArtist(artist);
+    NSString *wantTitle = normalize(title), *wantArtist = normalize(primary);
+    if (!wantTitle.length || !wantArtist.length) { done(nil, nil, nil, @"no title / artist"); return; }
+    itunesSearch([NSString stringWithFormat:@"%@ %@", title, primary], @"song", 25, ^(NSArray *songs) {
+        if (!songs) { done(nil, nil, nil, @"iTunes song search failed"); return; }
+        NSMutableArray<NSDictionary *> *singles = [NSMutableArray array], *others = [NSMutableArray array];
+        NSMutableSet *seen = [NSMutableSet setWithObject:excludeAlbumID ?: @""];
+        for (NSDictionary *r in songs) {
+            if (![r isKindOfClass:[NSDictionary class]] || !r[@"collectionId"]) continue;
+            NSString *cid = [r[@"collectionId"] description];
+            if ([seen containsObject:cid]) continue;
+            if (![normalize(r[@"trackName"]) isEqualToString:wantTitle] || !artistMatches(r[@"artistName"], wantArtist)) continue;
+            if (duration > 0 && [r[@"trackTimeMillis"] isKindOfClass:[NSNumber class]] &&
+                fabs([r[@"trackTimeMillis"] doubleValue] / 1000.0 - duration) > 3.0) continue;
+            [seen addObject:cid];
+            NSString *name = [r[@"collectionName"] isKindOfClass:[NSString class]] ? r[@"collectionName"] : @"";
+            // the song's own single is the likeliest to have a motion cover
+            NSMutableArray *bucket = [name hasSuffix:@" - Single"] ? singles : others;
+            [bucket addObject:r];
+        }
+        NSArray *candidates = [singles arrayByAddingObjectsFromArray:others];
+        if (candidates.count > 4) candidates = [candidates subarrayWithRange:NSMakeRange(0, 4)];
+        firstWithMotion(candidates, 0, [NSMutableArray array], done);
     });
 }

@@ -34,7 +34,9 @@ static NSDictionary *sLastInfo;              // Deezer's latest info, without ou
 static CFTimeInterval sLastInfoAt;
 static __weak MPNowPlayingInfoCenter *sCenter;
 static NSString *sCurrentKey;                // album now playing
-static NSMutableDictionary *sResults;        // album key -> @[infoKey, artwork] | NSDate (failed at)
+static NSString *sCurrentTrackKey;           // album + title now playing
+static NSMutableDictionary *sResults;        // album / track key -> @[infoKey, artwork] | NSDate (missed at) | kDZNoAlbumCover
+static NSMutableDictionary *sAlbumIDs;       // album key -> Apple Music album ID, for albums without a motion cover
 static NSMutableSet<NSString *> *sInFlight;
 static NSString *sKey3x4, *sKey1x1;          // what this iOS offers
 static NSUInteger sReady, sMisses;
@@ -128,71 +130,134 @@ static void giveUp(NSString *key, NSString *note) {
         sMisses++;
         sLastNote = note;
     }
-    DZLog("lock art: no animated cover: %@", note);
+    DZLog("lock art: no animated cover: %@ (retried after 30 min)", note);
 }
 
-static void resolve(NSString *key, NSString *title, NSString *artist, NSString *album, NSTimeInterval duration,
+// An album Apple Music has, but without a motion cover: its tracks then try
+// their other releases (singles first).
+static NSString *const kDZNoAlbumCover = @"no-album-cover";
+
+static BOOL needsResolve(id entry) {
+    return !entry || ([entry isKindOfClass:[NSDate class]] && -[(NSDate *)entry timeIntervalSinceNow] > 30 * 60);
+}
+
+// Call with sLock held.
+static BOOL isCurrent(NSString *key) {
+    return [sCurrentKey isEqualToString:key] || [sCurrentTrackKey isEqualToString:key];
+}
+
+// Turns Apple Music's motion cover into an MPMediaItemAnimatedArtwork for
+// `key`: the 3:4 clip if there is one, else the square one centre-cropped to
+// 3:4 (iOS 27 only offers the 3:4 key), else square under the 1:1 key.
+static void prepare(NSString *key, NSString *label, NSString *albumID, NSURL *tall, NSURL *square,
                     MPMediaItemArtwork *still) {
-    DZAppleMotionCover(title ?: @"", artist, album, duration, ^(NSString *albumID, NSURL *tall, NSURL *square, NSString *note) {
-        DZLog("lock art: \"%@\" / %@: %@", album ?: title, artist, note);
-        NSString *infoKey = nil, *shape = nil;
-        NSURL *video = nil;
-        if (sKey3x4 && tall) { infoKey = sKey3x4; video = tall; shape = @"3x4"; }
-        else if (sKey1x1 && square) { infoKey = sKey1x1; video = square; shape = @"1x1"; }
-        if (!video) {
-            giveUp(key, albumID ? @"Apple Music has no motion cover in a shape this iOS offers" : note);
-            return;
+    NSString *infoKey = nil, *name = nil;
+    NSURL *video = nil;
+    BOOL crop = NO;
+    if (sKey3x4 && tall) { infoKey = sKey3x4; video = tall; name = [albumID stringByAppendingString:@"-3x4"]; }
+    else if (sKey3x4 && square) { infoKey = sKey3x4; video = square; crop = YES; name = [albumID stringByAppendingString:@"-sq3x4"]; }
+    else if (sKey1x1 && square) { infoKey = sKey1x1; video = square; name = [albumID stringByAppendingString:@"-1x1"]; }
+    if (!video) { giveUp(key, [label stringByAppendingString:@": motion cover not in a shape this iOS offers"]); return; }
+
+    void (^ready)(NSURL *, NSString *) = ^(NSURL *file, NSString *fileNote) {
+        if (!file) { giveUp(key, [NSString stringWithFormat:@"%@: video %@", label, fileNote]); return; }
+        id artwork = makeArtwork([@"deezit-" stringByAppendingString:name], file, still);
+        if (!artwork) { giveUp(key, @"couldn't create MPMediaItemAnimatedArtwork"); return; }
+        BOOL current;
+        @synchronized (sLock) {
+            sResults[key] = @[infoKey, artwork];
+            [sInFlight removeObject:key];
+            sReady++;
+            sLastNote = [label stringByAppendingString:@" ready"];
+            current = isCurrent(key);
         }
-        NSString *name = [NSString stringWithFormat:@"%@-%@", albumID, shape];
-        DZMotionFile(video, name, ^(NSURL *file, NSString *fileNote) {
-            if (!file) { giveUp(key, [@"video download: " stringByAppendingString:fileNote]); return; }
-            id artwork = makeArtwork([@"deezit-" stringByAppendingString:name], file, still);
-            if (!artwork) { giveUp(key, @"couldn't create MPMediaItemAnimatedArtwork"); return; }
-            BOOL current;
-            @synchronized (sLock) {
-                sResults[key] = @[infoKey, artwork];
-                [sInFlight removeObject:key];
-                sReady++;
-                sLastNote = [NSString stringWithFormat:@"%@ (%@)", album ?: title, shape];
-                current = [sCurrentKey isEqualToString:key];
-            }
-            DZLog("lock art: ready, %@ %@ (%@)", shape, file.lastPathComponent, fileNote);
-            if (current) resend();
-        });
+        DZLog("lock art: ready for %@: %@ (%@)%@", label, file.lastPathComponent, fileNote,
+              current ? @", showing it now" : @", not playing any more: used next time it plays");
+        if (current) resend();
+    };
+    if (crop) DZMotionFileSquareTo3x4(video, name, ready);
+    else DZMotionFile(video, name, ready);
+}
+
+static void resolveTrack(NSString *tkey, NSString *title, NSString *artist, NSString *excludeAlbumID,
+                         NSTimeInterval duration, MPMediaItemArtwork *still) {
+    DZAppleMotionCoverFromOtherReleases(title, artist, excludeAlbumID, duration,
+                                        ^(NSString *albumID, NSURL *tall, NSURL *square, NSString *note) {
+        DZLog("lock art: song \"%@\" / %@: %@", title, artist, note);
+        if (!albumID) { giveUp(tkey, [NSString stringWithFormat:@"song \"%@\": %@", title, note]); return; }
+        prepare(tkey, [NSString stringWithFormat:@"song \"%@\" (another release)", title], albumID, tall, square, still);
     });
 }
 
-// Deezer's info, plus the animated cover when there is one for this album.
+static void resolveAlbum(NSString *akey, NSString *tkey, NSString *title, NSString *artist, NSString *album,
+                         NSTimeInterval duration, MPMediaItemArtwork *still) {
+    DZAppleMotionCover(title ?: @"", artist, album, duration, ^(NSString *albumID, NSURL *tall, NSURL *square, NSString *note) {
+        DZLog("lock art: \"%@\" / %@: %@", album ?: title, artist, note);
+        NSString *label = [NSString stringWithFormat:@"\"%@\"", album ?: title];
+        if (!albumID) { giveUp(akey, [NSString stringWithFormat:@"%@: %@", label, note]); return; }
+        if (tall || square) { prepare(akey, label, albumID, tall, square, still); return; }
+
+        // Apple Music has the album, but no motion cover for it
+        BOOL startTrack = NO;
+        @synchronized (sLock) {
+            sResults[akey] = kDZNoAlbumCover;
+            sAlbumIDs[akey] = albumID;
+            [sInFlight removeObject:akey];
+            sLastNote = [label stringByAppendingString:@" has no motion cover; trying the song's other releases"];
+            if (tkey && title && needsResolve(sResults[tkey]) && ![sInFlight containsObject:tkey]) {
+                [sInFlight addObject:tkey];
+                startTrack = YES;
+            }
+        }
+        if (startTrack) resolveTrack(tkey, title, artist, albumID, duration, still);
+    });
+}
+
+// Deezer's info, plus the animated cover when there is one for this album
+// (or, for an album without one, for this song's other release).
 static NSDictionary *withArtwork(MPNowPlayingInfoCenter *center, NSDictionary *info) {
     if (![info isKindOfClass:[NSDictionary class]] || !info.count) {
-        @synchronized (sLock) { sLastInfo = nil; sCurrentKey = nil; }
+        @synchronized (sLock) { sLastInfo = nil; sCurrentKey = nil; sCurrentTrackKey = nil; }
         return info;
     }
     NSString *title = stringIn(info, MPMediaItemPropertyTitle);
     NSString *artist = stringIn(info, MPMediaItemPropertyArtist);
     NSString *album = stringIn(info, MPMediaItemPropertyAlbumTitle);
     if (!artist || !(album || title)) return info;
-    NSString *key = albumKey(artist, album, title);
+    NSString *akey = albumKey(artist, album, title);
+    NSString *tkey = title ? [akey stringByAppendingFormat:@"|%@", title.lowercaseString] : nil;
+    NSNumber *durationValue = info[MPMediaItemPropertyPlaybackDuration];
+    NSTimeInterval duration = [durationValue isKindOfClass:[NSNumber class]] ? durationValue.doubleValue : 0;
+    id stillValue = info[MPMediaItemPropertyArtwork];
+    MPMediaItemArtwork *still = [stillValue isKindOfClass:[MPMediaItemArtwork class]] ? stillValue : nil;
 
-    BOOL start = NO;
-    id entry;
+    BOOL startAlbum = NO, startTrack = NO;
+    NSString *excludeAlbumID = nil;
+    id entry = nil;
     @synchronized (sLock) {
         sLastInfo = [info copy];
         sLastInfoAt = CACurrentMediaTime();
         sCenter = center;
-        sCurrentKey = key;
-        entry = sResults[key];
-        BOOL recentMiss = [entry isKindOfClass:[NSDate class]] && -[(NSDate *)entry timeIntervalSinceNow] < 30 * 60;
-        if (!entry || ([entry isKindOfClass:[NSDate class]] && !recentMiss)) {
-            if (![sInFlight containsObject:key]) { [sInFlight addObject:key]; start = YES; }
+        sCurrentKey = akey;
+        sCurrentTrackKey = tkey;
+        id albumEntry = sResults[akey];
+        if ([albumEntry isEqual:kDZNoAlbumCover]) {
+            entry = tkey ? sResults[tkey] : nil;
+            if (tkey && needsResolve(entry) && ![sInFlight containsObject:tkey]) {
+                [sInFlight addObject:tkey];
+                startTrack = YES;
+                excludeAlbumID = sAlbumIDs[akey];
+            }
+        } else {
+            entry = albumEntry;
+            if (needsResolve(albumEntry) && ![sInFlight containsObject:akey]) {
+                [sInFlight addObject:akey];
+                startAlbum = YES;
+            }
         }
     }
-    if (start) {
-        NSNumber *duration = info[MPMediaItemPropertyPlaybackDuration];
-        id still = info[MPMediaItemPropertyArtwork];
-        resolve(key, title, artist, album, [duration isKindOfClass:[NSNumber class]] ? duration.doubleValue : 0,
-                [still isKindOfClass:[MPMediaItemArtwork class]] ? still : nil);
-    }
+    if (startAlbum) resolveAlbum(akey, tkey, title, artist, album, duration, still);
+    if (startTrack) resolveTrack(tkey, title, artist, excludeAlbumID, duration, still);
     if (![entry isKindOfClass:[NSArray class]]) return info;
     NSMutableDictionary *out = [info mutableCopy];
     out[((NSArray *)entry)[0]] = ((NSArray *)entry)[1];
@@ -233,6 +298,7 @@ void DZLockArtworkInstall(void) {
             return;
         }
         sResults = [NSMutableDictionary dictionary];
+        sAlbumIDs = [NSMutableDictionary dictionary];
         sInFlight = [NSMutableSet set];
         readOfferedKeys();
         if (!sKey3x4 && !sKey1x1) return;
