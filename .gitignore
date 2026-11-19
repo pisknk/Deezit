@@ -1,0 +1,13 @@
+/.theos
+/packages
+.DS_Store
+*.ips
+
+# never commit the app itself or its binaries
+*.ipa
+/Payload
+*.app
+Deezer
+Deezer_symbols.txt
+docs/analysis/classes.txt
+__pycache__/

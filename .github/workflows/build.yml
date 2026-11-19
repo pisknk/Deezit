@@ -1,0 +1,63 @@
+name: Build Deezit dylib
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: checkout code
+      uses: actions/checkout@v4
+
+    - name: setup theos
+      run: |
+        # theos needs GNU make; ldid signs the dylib
+        brew install make ldid
+        echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
+
+        export THEOS=$HOME/theos
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+        echo "$THEOS/bin" >> $GITHUB_PATH
+        git clone --recursive --quiet https://github.com/theos/theos.git $THEOS
+
+        # no theos/sdks download: on macOS theos picks up the iOS SDK that
+        # ships with the runner's Xcode when TARGET uses "latest"
+        xcrun --sdk iphoneos --show-sdk-version
+
+    - name: stamp version from run number
+      run: |
+        BASE_VERSION="$(sed -n 's/^Version: //p' control)"
+        VERSION="${BASE_VERSION}+${{ github.run_number }}"
+        sed -i '' "s/^Version: .*/Version: $VERSION/" control
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "building $VERSION"
+
+    - name: build dylib
+      run: |
+        make FINALPACKAGE=1 DEBUG=0
+        mkdir -p artifacts
+        cp .theos/obj/Deezit.dylib artifacts/Deezit.dylib
+
+    - name: verify dylib
+      run: |
+        cd artifacts
+        file Deezit.dylib
+        otool -L Deezit.dylib
+        # sideloaded = no Substrate/ElleKit on device: the dylib must only
+        # link system frameworks, or dyld aborts Deezer at launch
+        if otool -L Deezit.dylib | grep -qiE 'substrate|ellekit|libhooker'; then
+          echo "::error::Deezit.dylib links a hooking library; it would crash a sideloaded app"
+          exit 1
+        fi
+        lipo -archs Deezit.dylib | grep -q arm64
+
+    - name: upload dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: Deezit-${{ env.VERSION }}
+        path: artifacts/Deezit.dylib
+        retention-days: 30

@@ -1,0 +1,8 @@
+Package: com.pisknk.deezit
+Name: Deezit
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: slowed + reverb for Deezer, no jailbreak required
+Maintainer: pisknk
+Author: pisknk
+Section: Tweaks
