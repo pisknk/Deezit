@@ -2,6 +2,7 @@
 #import "DZDebugLog.h"
 #import "DZPrefs.h"
 #import "DZAudioHook.h"
+#import "DZLockArtwork.h"
 #import "DZSettingsEntry.h"
 #import "DZLog.h"
 
@@ -138,6 +139,7 @@ void DZToast(NSString *message) {
         @"Deezit %s · %@ %@ (%@) · iOS %@\n"
         @"audio hook: %@\n"
         @"%@\n"
+        @"%@\n"
         @"effect: %@ · speed %.2fx · reverb mix %d%% room %d%% damp %d%%\n"
         @"gestures: 3-finger double tap = this panel · 3-finger hold = settings\n"
         @"──────────────────────────────────────────\n",
@@ -146,6 +148,7 @@ void DZToast(NSString *message) {
         [b objectForInfoDictionaryKey:@"CFBundleVersion"], UIDevice.currentDevice.systemVersion,
         DZPrefBool(kDZAudioHook) ? @"on" : @"OFF (kill switch)",
         DZAudioStatusSummary(),
+        DZLockArtworkStatus(),
         p.enabled ? @"ON" : @"off", p.speed,
         (int)lroundf(p.reverbMix * 100), (int)lroundf(p.reverbRoom * 100), (int)lroundf(p.reverbDamp * 100)];
 }

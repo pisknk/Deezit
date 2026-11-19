@@ -10,6 +10,7 @@
 #import "DZPrefs.h"
 #import "DZAudioHook.h"
 #import "DZSettingsEntry.h"
+#import "DZLockArtwork.h"
 
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
@@ -20,7 +21,7 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
 
 // Hooks live in their own files as %group blocks, each %init-ed by its
 // install function: audio in DZAudioHook.x, UI probes in DZProbes.x, the
-// player's ••• menu row in DZPlayerMenu.x.
+// player's ••• menu row in DZPlayerMenu.x, the lock-screen cover in DZLockArtwork.x.
 
 %ctor {
     @autoreleasepool {
@@ -34,6 +35,7 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
         DZAudioInstall();
         DZProbesInstall();
         DZPlayerMenuInstall();
+        DZLockArtworkInstall();
         DZSettingsEntryInstall();
     }
 }

@@ -12,6 +12,7 @@ NSString *const kDZReverbRoom = @"reverbRoom";
 NSString *const kDZReverbDamp = @"reverbDamp";
 NSString *const kDZPreset = @"preset";
 NSString *const kDZAudioHook = @"audioHook";
+NSString *const kDZLockArtwork = @"lockArtwork";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -34,6 +35,7 @@ static NSDictionary *defaultValues(void) {
         kDZReverbDamp: @0.4f,
         kDZPreset: @"off",
         kDZAudioHook: @YES,
+        kDZLockArtwork: @YES,
     };
 }
 

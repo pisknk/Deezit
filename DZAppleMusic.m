@@ -1,0 +1,347 @@
+#import "DZAppleMusic.h"
+#import "DZPrefs.h"
+#import "DZLog.h"
+#import <string.h>
+
+// Adapted from pisknk/twenty-one-reborn: TJCatalogMatch.m (name matching via
+// the iTunes Search API) and TJCatalogAPI.m (web-player token + amp-api).
+
+static NSString *const kDZAMTokenKey = @"appleMusicWebToken";
+static NSString *const kDZAMMobileUA = @"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+static NSString *const kDZAMDesktopUA = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+
+static NSString *storefront(void) {
+    NSString *cc = [[NSLocale currentLocale] objectForKey:NSLocaleCountryCode];
+    return cc.length == 2 ? cc.lowercaseString : @"us";
+}
+
+static void httpGet(NSURL *url, NSString *bearer, NSString *userAgent, NSTimeInterval timeout,
+                    void (^done)(NSData *data, NSInteger status)) {
+    if (!url) { done(nil, 0); return; }
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = timeout;
+    [req setValue:userAgent forHTTPHeaderField:@"User-Agent"];
+    if (bearer) {
+        [req setValue:[@"Bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"https://music.apple.com" forHTTPHeaderField:@"Origin"];
+        [req setValue:@"https://music.apple.com/" forHTTPHeaderField:@"Referer"];
+    }
+    [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger status = [resp isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        done(err ? nil : data, status);
+    }] resume];
+}
+
+static id jsonObject(NSData *data) {
+    return data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+}
+
+#pragma mark - token (TJCatalogAPI)
+
+static NSDictionary *jwtPart(NSString *part) {
+    NSString *b64 = [[part stringByReplacingOccurrencesOfString:@"-" withString:@"+"]
+                     stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+    while (b64.length % 4) b64 = [b64 stringByAppendingString:@"="];
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+    id json = jsonObject(data);
+    return [json isKindOfClass:[NSDictionary class]] ? json : nil;
+}
+
+static NSTimeInterval tokenExpiry(NSString *jwt) {
+    NSArray<NSString *> *parts = [jwt componentsSeparatedByString:@"."];
+    if (parts.count != 3) return 0;
+    id exp = jwtPart(parts[1])[@"exp"];
+    return [exp isKindOfClass:[NSNumber class]] ? [exp doubleValue] : 0;
+}
+
+static BOOL tokenUsable(NSString *jwt) {
+    NSArray<NSString *> *parts = [jwt componentsSeparatedByString:@"."];
+    return parts.count == 3 && jwtPart(parts[0])[@"alg"] &&
+           tokenExpiry(jwt) > NSDate.date.timeIntervalSince1970 + 300;
+}
+
+static NSString *jwtInData(NSData *data) {
+    const char *bytes = data.bytes;
+    NSUInteger n = data.length, from = 0;
+    while (bytes && from + 3 <= n) {
+        const char *hit = memmem(bytes + from, n - from, "eyJ", 3);
+        if (!hit) break;
+        NSUInteger start = (NSUInteger)(hit - bytes), j = start, seg = 0;
+        int dots = 0;
+        while (j < n) {
+            char c = bytes[j];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') { seg++; j++; }
+            else if (c == '.' && dots < 2 && seg >= 10) { dots++; seg = 0; j++; }
+            else break;
+        }
+        if (dots == 2 && seg >= 10) {
+            NSString *candidate = [[NSString alloc] initWithBytes:bytes + start length:j - start encoding:NSASCIIStringEncoding];
+            if (candidate && tokenUsable(candidate)) return candidate;
+        }
+        from = start + 1;
+    }
+    return nil;
+}
+
+static NSArray<NSString *> *chunkNames(NSData *js) {
+    NSString *text = [[NSString alloc] initWithData:js encoding:NSISOLatin1StringEncoding];
+    if (!text.length) return @[];
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"[A-Za-z0-9_.-]+~[0-9a-f]{6,}\\.js" options:0 error:nil];
+    });
+    NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSet];
+    for (NSTextCheckingResult *m in [re matchesInString:text options:0 range:NSMakeRange(0, text.length)]) {
+        [names addObject:[text substringWithRange:m.range]];
+        if (names.count >= 200) break;
+    }
+    return names.array;
+}
+
+static void searchScripts(NSMutableArray<NSString *> *queue, NSMutableSet<NSString *> *seen, NSUInteger scanned,
+                          NSString *ua, void (^done)(NSString *token)) {
+    if (!queue.count || scanned >= 40) { done(nil); return; }
+    NSString *path = queue.firstObject;
+    [queue removeObjectAtIndex:0];
+    httpGet([NSURL URLWithString:[@"https://music.apple.com" stringByAppendingString:path]], nil, ua, 10,
+            ^(NSData *js, NSInteger status) {
+        NSString *token = js ? jwtInData(js) : nil;
+        if (token) { done(token); return; }
+        for (NSString *name in js ? chunkNames(js) : @[]) {
+            NSString *chunk = [@"/assets/" stringByAppendingString:name];
+            if ([seen containsObject:chunk]) continue;
+            [seen addObject:chunk];
+            [queue addObject:chunk];
+        }
+        searchScripts(queue, seen, scanned + 1, ua, done);
+    });
+}
+
+static void scrapeToken(NSString *ua, void (^done)(NSString *token)) {
+    NSURL *page = [NSURL URLWithString:[NSString stringWithFormat:@"https://music.apple.com/%@/browse", storefront()]];
+    httpGet(page, nil, ua, 10, ^(NSData *data, NSInteger status) {
+        NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        if (!html) { done(nil); return; }
+        NSString *inPage = jwtInData(data);
+        if (!inPage) {
+            NSString *decoded = html.stringByRemovingPercentEncoding;
+            if (decoded) inPage = jwtInData([decoded dataUsingEncoding:NSUTF8StringEncoding]);
+        }
+        if (inPage) { done(inPage); return; }
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:src|href)=\"(/assets/[^\"]+\\.js)\""
+                                                                            options:0 error:nil];
+        NSMutableArray<NSString *> *scripts = [NSMutableArray array];
+        for (NSTextCheckingResult *m in [re matchesInString:html options:0 range:NSMakeRange(0, html.length)]) {
+            NSString *path = [html substringWithRange:[m rangeAtIndex:1]];
+            if ([scripts containsObject:path]) continue;
+            if ([path.lastPathComponent hasPrefix:@"index"]) [scripts insertObject:path atIndex:0];
+            else [scripts addObject:path];
+        }
+        searchScripts(scripts, [NSMutableSet setWithArray:scripts], 0, ua, done);
+    });
+}
+
+// One fetch at a time; everyone asking meanwhile waits for it. A token is
+// kept in Deezit's prefs until about five minutes before it expires; after a
+// failed scrape nobody retries for ten minutes.
+static void withToken(BOOL fresh, void (^use)(NSString *token)) {
+    static dispatch_queue_t q;
+    static NSString *token;
+    static NSMutableArray *waiters;
+    static BOOL fetching;
+    static NSTimeInterval failedUntil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.pisknk.deezit.amtoken", DISPATCH_QUEUE_SERIAL);
+        waiters = [NSMutableArray array];
+    });
+    dispatch_async(q, ^{
+        NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+        if (fresh) token = nil;
+        else if (!token) token = DZPrefString(kDZAMTokenKey).length ? DZPrefString(kDZAMTokenKey) : nil;
+        if (token && tokenExpiry(token) > now + 300) { use(token); return; }
+        if (failedUntil > now) { use(nil); return; }
+
+        [waiters addObject:[use copy]];
+        if (fetching) return;
+        fetching = YES;
+        void (^finish)(NSString *) = ^(NSString *got) {
+            dispatch_async(q, ^{
+                fetching = NO;
+                token = got;
+                if (got) DZPrefSet(kDZAMTokenKey, got);
+                else failedUntil = NSDate.date.timeIntervalSince1970 + 600;
+                DZLog("lock art: Apple Music token %@", got ? [NSString stringWithFormat:@"read, good until %@",
+                      [NSDate dateWithTimeIntervalSince1970:tokenExpiry(got)]] : @"not found (retry in 10 min)");
+                NSArray *pending = [waiters copy];
+                [waiters removeAllObjects];
+                for (void (^w)(NSString *) in pending) w(got);
+            });
+        };
+        scrapeToken(kDZAMMobileUA, ^(NSString *got) {
+            if (got) { finish(got); return; }
+            scrapeToken(kDZAMDesktopUA, finish);
+        });
+    });
+}
+
+static void catalogGet(NSString *path, BOOL retried, void (^done)(NSData *data, NSInteger status)) {
+    withToken(retried, ^(NSString *token) {
+        if (!token) { done(nil, 0); return; }
+        NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://amp-api.music.apple.com/v1/catalog/%@/%@",
+                                           storefront(), path]];
+        httpGet(url, token, kDZAMMobileUA, 10, ^(NSData *data, NSInteger status) {
+            if ((status == 401 || status == 403) && !retried) { catalogGet(path, YES, done); return; }
+            done(data, status);
+        });
+    });
+}
+
+#pragma mark - name matching (TJCatalogMatch)
+
+static NSString *normalize(NSString *s) {
+    if (!s.length) return @"";
+    NSString *t = [s.precomposedStringWithCanonicalMapping
+                   stringByFoldingWithOptions:NSDiacriticInsensitiveSearch | NSCaseInsensitiveSearch | NSWidthInsensitiveSearch
+                   locale:nil].lowercaseString;
+    static NSRegularExpression *brackets, *dashSuffix;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *words = @"(feat\\.?|ft\\.?|featuring|with |remaster|explicit|clean|radio edit|mono|stereo)";
+        brackets = [NSRegularExpression regularExpressionWithPattern:
+                    [NSString stringWithFormat:@"[\\(\\[][^\\)\\]]*%@[^\\)\\]]*[\\)\\]]", words] options:0 error:nil];
+        dashSuffix = [NSRegularExpression regularExpressionWithPattern:
+                      [NSString stringWithFormat:@"\\s+-\\s+.*%@.*$", words] options:0 error:nil];
+    });
+    t = [brackets stringByReplacingMatchesInString:t options:0 range:NSMakeRange(0, t.length) withTemplate:@""];
+    t = [dashSuffix stringByReplacingMatchesInString:t options:0 range:NSMakeRange(0, t.length) withTemplate:@""];
+    NSMutableString *out = [NSMutableString string];
+    [t enumerateSubstringsInRange:NSMakeRange(0, t.length) options:NSStringEnumerationByComposedCharacterSequences
+                       usingBlock:^(NSString *ch, NSRange r1, NSRange r2, BOOL *stop) {
+        if ([ch rangeOfCharacterFromSet:NSCharacterSet.alphanumericCharacterSet].location != NSNotFound) [out appendString:ch];
+    }];
+    return out;
+}
+
+static NSString *normalizeAlbum(NSString *s) {
+    if (!s.length) return @"";
+    static NSRegularExpression *edition, *suffix;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        edition = [NSRegularExpression regularExpressionWithPattern:
+                   @"\\s*[\\(\\[][^\\)\\]]*(deluxe|edition|expanded|bonus)[^\\)\\]]*[\\)\\]]"
+                                                            options:NSRegularExpressionCaseInsensitive error:nil];
+        suffix = [NSRegularExpression regularExpressionWithPattern:@"\\s+-\\s+(single|ep)\\s*$"
+                                                           options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    NSString *t = [edition stringByReplacingMatchesInString:s options:0 range:NSMakeRange(0, s.length) withTemplate:@""];
+    t = [suffix stringByReplacingMatchesInString:t options:0 range:NSMakeRange(0, t.length) withTemplate:@""];
+    return normalize(t);
+}
+
+static NSString *primaryArtist(NSString *artist) {
+    NSString *a = artist ?: @"";
+    for (NSString *sep in @[@", ", @" & ", @" feat. ", @" feat ", @" ft. ", @" x ", @" with "]) {
+        NSRange r = [a.lowercaseString rangeOfString:sep];
+        if (r.location != NSNotFound && r.location > 0) a = [a substringToIndex:r.location];
+    }
+    return a;
+}
+
+static BOOL artistMatches(id got, NSString *want) {
+    NSString *g = [got isKindOfClass:[NSString class]] ? normalize(got) : @"";
+    return g.length && want.length && ([g containsString:want] || [want containsString:g]);
+}
+
+static void itunesSearch(NSString *term, NSString *entity, NSUInteger limit, void (^done)(NSArray *results)) {
+    NSMutableCharacterSet *allowed = [NSCharacterSet.URLQueryAllowedCharacterSet mutableCopy];
+    [allowed removeCharactersInString:@"&+=?#"];
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://itunes.apple.com/search?term=%@&entity=%@&limit=%lu&country=%@",
+                                       [term stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"",
+                                       entity, (unsigned long)limit, storefront()]];
+    httpGet(url, nil, kDZAMMobileUA, 8, ^(NSData *data, NSInteger status) {
+        if (status != 200 || !data) { done(nil); return; }
+        NSDictionary *json = jsonObject(data);
+        NSArray *results = [json isKindOfClass:[NSDictionary class]] ? json[@"results"] : nil;
+        done([results isKindOfClass:[NSArray class]] ? results : @[]);
+    });
+}
+
+// Album first (Deezer's album name is the thing we want the cover of), then
+// the track, which also finds albums whose names differ between services.
+static void matchAlbum(NSString *title, NSString *artist, NSString *album, NSTimeInterval duration,
+                       void (^done)(NSString *albumID, NSString *note)) {
+    NSString *primary = primaryArtist(artist);
+    NSString *wantArtist = normalize(primary), *wantAlbum = normalizeAlbum(album), *wantTitle = normalize(title);
+    if (!wantArtist.length || (!wantAlbum.length && !wantTitle.length)) { done(nil, @"no artist / album / title to match"); return; }
+
+    void (^bySong)(void) = ^{
+        if (!wantTitle.length) { done(nil, @"album not found, no title to try"); return; }
+        itunesSearch([NSString stringWithFormat:@"%@ %@", title, primary], @"song", 15, ^(NSArray *songs) {
+            if (!songs) { done(nil, @"iTunes song search failed"); return; }
+            NSDictionary *best = nil;
+            BOOL bestSameAlbum = NO;
+            for (NSDictionary *r in songs) {
+                if (![r isKindOfClass:[NSDictionary class]] || !r[@"collectionId"]) continue;
+                if (![normalize(r[@"trackName"]) isEqualToString:wantTitle] || !artistMatches(r[@"artistName"], wantArtist)) continue;
+                if (duration > 0 && [r[@"trackTimeMillis"] isKindOfClass:[NSNumber class]] &&
+                    fabs([r[@"trackTimeMillis"] doubleValue] / 1000.0 - duration) > 3.0) continue;
+                BOOL same = wantAlbum.length && [normalizeAlbum(r[@"collectionName"]) isEqualToString:wantAlbum];
+                if (!best || (same && !bestSameAlbum)) { best = r; bestSameAlbum = same; }
+                if (bestSameAlbum) break;
+            }
+            if (!best) { done(nil, [NSString stringWithFormat:@"no confident match among %lu songs", (unsigned long)songs.count]); return; }
+            done([best[@"collectionId"] description],
+                 [NSString stringWithFormat:@"song match -> \"%@\" (%@)", best[@"collectionName"], best[@"artistName"]]);
+        });
+    };
+
+    if (!wantAlbum.length) { bySong(); return; }
+    itunesSearch([NSString stringWithFormat:@"%@ %@", album, primary], @"album", 10, ^(NSArray *albums) {
+        for (NSDictionary *a in albums ?: @[]) {
+            if (![a isKindOfClass:[NSDictionary class]] || !a[@"collectionId"]) continue;
+            if (![normalizeAlbum(a[@"collectionName"]) isEqualToString:wantAlbum] || !artistMatches(a[@"artistName"], wantArtist)) continue;
+            done([a[@"collectionId"] description],
+                 [NSString stringWithFormat:@"album match -> \"%@\" (%@)", a[@"collectionName"], a[@"artistName"]]);
+            return;
+        }
+        bySong();
+    });
+}
+
+#pragma mark - editorial video
+
+static NSURL *videoIn(NSDictionary *editorial, NSArray<NSString *> *keys) {
+    for (NSString *key in keys) {
+        NSDictionary *v = editorial[key];
+        NSString *s = [v isKindOfClass:[NSDictionary class]] ? v[@"video"] : nil;
+        if ([s isKindOfClass:[NSString class]] && [s hasPrefix:@"https://"] && [s containsString:@".m3u8"]) {
+            NSURL *u = [NSURL URLWithString:s];
+            if (u) return u;
+        }
+    }
+    return nil;
+}
+
+void DZAppleMotionCover(NSString *title, NSString *artist, NSString *album, NSTimeInterval duration, DZMotionCoverResult done) {
+    matchAlbum(title, artist, album ?: @"", duration, ^(NSString *albumID, NSString *matchNote) {
+        if (!albumID.length) { done(nil, nil, nil, matchNote); return; }
+        catalogGet([NSString stringWithFormat:@"albums/%@?extend=editorialVideo", albumID], NO, ^(NSData *data, NSInteger status) {
+            NSDictionary *json = jsonObject(data);
+            NSArray *items = [json isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
+            NSDictionary *first = [items isKindOfClass:[NSArray class]] && items.count ? items.firstObject : nil;
+            NSDictionary *attrs = [first isKindOfClass:[NSDictionary class]] ? first[@"attributes"] : nil;
+            NSDictionary *ev = [attrs isKindOfClass:[NSDictionary class]] ? attrs[@"editorialVideo"] : nil;
+            if (![ev isKindOfClass:[NSDictionary class]]) {
+                done(albumID, nil, nil, [NSString stringWithFormat:@"%@; album %@: %@", matchNote, albumID,
+                     status == 200 ? @"no motion cover" : [NSString stringWithFormat:@"catalog HTTP %ld", (long)status]]);
+                return;
+            }
+            NSURL *tall = videoIn(ev, @[@"motionDetailTall", @"motionTallVideo3x4"]);
+            NSURL *square = videoIn(ev, @[@"motionDetailSquare", @"motionSquareVideo1x1"]);
+            done(albumID, tall, square, [NSString stringWithFormat:@"%@; album %@: tall %@, square %@", matchNote, albumID,
+                                         tall ? @"yes" : @"no", square ? @"yes" : @"no"]);
+        });
+    });
+}

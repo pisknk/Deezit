@@ -8,6 +8,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionPresets,
     DZSectionSpeed,
     DZSectionReverb,
+    DZSectionLockScreen,
     DZSectionReset,
     DZSectionCount,
 };
@@ -145,6 +146,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
+        case DZSectionLockScreen: return self.pageTitle ? 0 : 1;   // not in the Playback Controls sheet
         case DZSectionReset: return 1;
     }
     return 0;
@@ -155,6 +157,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionPresets: return @"Presets";
         case DZSectionSpeed: return @"Speed";
         case DZSectionReverb: return @"Reverb";
+        case DZSectionLockScreen: return self.pageTitle ? nil : @"Lock Screen";
     }
     return nil;
 }
@@ -165,6 +168,9 @@ typedef NS_ENUM(NSInteger, DZSection) {
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionSpeed:
             return @"Pitch follows speed, like a turntable: slower is deeper.";
+        case DZSectionLockScreen:
+            return self.pageTitle ? nil
+                : @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.";
         case DZSectionReset: {
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
@@ -214,6 +220,20 @@ typedef NS_ENUM(NSInteger, DZSection) {
             NSArray *keys = @[kDZReverbMix, kDZReverbRoom, kDZReverbDamp];
             return [self sliderCell:tv at:ip title:titles[ip.row] key:keys[ip.row] min:0 max:1 format:pct];
         }
+        case DZSectionLockScreen: {
+            UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            cfg.text = @"Animated album covers";
+            cfg.image = [UIImage systemImageNamed:@"lock.rectangle.stack"];
+            c.contentConfiguration = cfg;
+            UISwitch *sw = [UISwitch new];
+            sw.on = DZPrefBool(kDZLockArtwork);
+            [sw addTarget:self action:@selector(toggleLockArtwork:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+            c.accessoryType = UITableViewCellAccessoryNone;
+            c.selectionStyle = UITableViewCellSelectionStyleNone;
+            return c;
+        }
         case DZSectionReset: {
             UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
@@ -248,6 +268,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 - (void)toggleEnabled:(UISwitch *)sw {
     DZPrefSet(kDZEnabled, @(sw.on));
+}
+
+- (void)toggleLockArtwork:(UISwitch *)sw {
+    DZPrefSet(kDZLockArtwork, @(sw.on));
 }
 
 - (void)sliderMoved:(UISlider *)slider {
