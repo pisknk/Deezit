@@ -11,6 +11,7 @@ NSString *const kDZReverbMix = @"reverbMix";
 NSString *const kDZReverbRoom = @"reverbRoom";
 NSString *const kDZReverbDamp = @"reverbDamp";
 NSString *const kDZPreset = @"preset";
+NSString *const kDZAudioHook = @"audioHook";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -32,6 +33,7 @@ static NSDictionary *defaultValues(void) {
         kDZReverbRoom: @0.75f,
         kDZReverbDamp: @0.4f,
         kDZPreset: @"off",
+        kDZAudioHook: @YES,
     };
 }
 
@@ -60,9 +62,9 @@ void DZPrefsBootstrap(void) {
         sDefaults = [[NSUserDefaults alloc] initWithSuiteName:kDZPrefsSuite];
         [sDefaults registerDefaults:defaultValues()];
         refreshAtomics();
-        DZLog("prefs loaded: enabled=%d speed=%.2f mix=%.2f",
+        DZLog("prefs loaded: enabled=%d speed=%.2f mix=%.2f audioHook=%d",
               [sDefaults boolForKey:kDZEnabled], [sDefaults floatForKey:kDZSpeed],
-              [sDefaults floatForKey:kDZReverbMix]);
+              [sDefaults floatForKey:kDZReverbMix], [sDefaults boolForKey:kDZAudioHook]);
     });
 }
 

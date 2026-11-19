@@ -15,6 +15,8 @@ extern NSString *const kDZReverbMix;    // float 0 ... 1 (wet amount)
 extern NSString *const kDZReverbRoom;   // float 0 ... 1 (room size / decay)
 extern NSString *const kDZReverbDamp;   // float 0 ... 1 (high-frequency damping)
 extern NSString *const kDZPreset;       // NSString preset identifier, "custom" after manual edits
+extern NSString *const kDZAudioHook;    // BOOL  kill switch: NO = never touch Deezer's audio graph
+                                        //       (read at launch, set from the debug panel)
 
 extern const float kDZSpeedMin;
 extern const float kDZSpeedMax;

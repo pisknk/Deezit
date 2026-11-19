@@ -6,22 +6,31 @@
 
 #import <UIKit/UIKit.h>
 #import "DZLog.h"
+#import "DZDebugLog.h"
 #import "DZPrefs.h"
 #import "DZAudioHook.h"
 #import "DZSettingsEntry.h"
 
-// Class-specific hooks (Now Playing button, Settings row, audio classes) go in
-// %group blocks and are %init-ed only after objc_getClass() confirms the class
-// exists, so a Deezer update that renames something degrades instead of crashing.
+#ifndef DEEZIT_VERSION
+#define DEEZIT_VERSION "dev"
+#endif
+
+void DZProbesInstall(void); // DZProbes.x
+
+// Hooks live in their own files as %group blocks, each %init-ed by its
+// install function: audio in DZAudioHook.x, UI probes in DZProbes.x.
 
 %ctor {
     @autoreleasepool {
-        NSString *bid = NSBundle.mainBundle.bundleIdentifier;
-        DZLog("loaded into %{public}@ %{public}@", bid,
-              [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);
+        DZDebugLogStart();
+        NSBundle *b = NSBundle.mainBundle;
+        DZLog("Deezit %s loaded into %@ %@ (%@), iOS %@", DEEZIT_VERSION, b.bundleIdentifier,
+              [b objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
+              [b objectForInfoDictionaryKey:@"CFBundleVersion"], UIDevice.currentDevice.systemVersion);
 
         DZPrefsBootstrap();
         DZAudioInstall();
+        DZProbesInstall();
         DZSettingsEntryInstall();
     }
 }

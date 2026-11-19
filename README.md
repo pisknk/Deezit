@@ -17,26 +17,36 @@ generator (plain ObjC runtime).
 
 | Part | State |
 |---|---|
-| IPA analysis tooling (`tools/analyze_ipa.py`) | done, tested on synthetic binaries |
-| Analysis of Deezer 11.27.0 | **pending**: see [`docs/ANALYSIS.md`](docs/ANALYSIS.md) |
+| IPA analysis tooling (`tools/analyze_ipa.py`) | done, run on the real 11.27.0 binary |
+| Analysis of Deezer 11.27.0 | done: see [`docs/ANALYSIS.md`](docs/ANALYSIS.md) |
 | Settings page (switch, presets, sliders, reset) | done, saves prefs |
 | Prefs → realtime-safe audio params | done |
-| Audio hook | scaffold only. The backend is picked from the analysis |
-| DSP (varispeed + reverb) | interface only, pass-through for now |
-| CI build | `.github/workflows/build.yml` |
+| Audio hook | **AVAudioEngine backend written, not yet tested on a device**: varispeed + Apple Reverb2 spliced in front of Deezer's output node |
+| Debug panel + in-app log | done (three-finger double tap) |
+| Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
+| DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
+| CI build | `.github/workflows/build.yml`: `Deezit.dylib` + rootless `.deb` |
 
-Until the audio hook lands, injecting the dylib only adds the settings page.
-Deezer's playback is untouched.
+The audio hook has a kill switch: if playback breaks, open the debug panel,
+tap **⋯ → Turn audio hook off**, and relaunch Deezer. Deezit then leaves
+Deezer's audio completely alone.
 
-## Opening the settings
+## Gestures
 
-Temporary: **three-finger long press** anywhere in Deezer. A row in Deezer's
-own Settings and a button on Now Playing come once the analysis names those
-screens.
+Anywhere in Deezer:
+
+| Gesture | Opens |
+|---|---|
+| **Three-finger hold** | Deezit settings (temporary: a button on Deezer's own Settings / player comes later) |
+| **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
+
+The first launch of each Deezit version shows a short banner to confirm the
+injection worked.
 
 ## Building
 
-CI builds on every push. Download `Deezit-<version>` from the run's artifacts.
+CI builds on every push (except docs-only pushes). Download `Deezit-<version>`
+from the run's artifacts: it holds `Deezit.dylib` and a rootless `.deb`.
 
 Locally (macOS with Xcode, or Linux with a Theos toolchain + SDK):
 
@@ -53,20 +63,30 @@ e.g. `make TARGET=iphone:clang:16.5:15.0 FINALPACKAGE=1`.
 cyan -i Deezer.ipa -o Deezer-Deezit.ipa -f .theos/obj/Deezit.dylib
 ```
 
-Then sideload `Deezer-Deezit.ipa` as usual. Logs: Console.app, filter
-`subsystem:com.pisknk.deezit`.
+Then sideload `Deezer-Deezit.ipa` as usual.
+
+## Logs
+
+The debug panel (three-finger double tap) shows this session's log live, and
+its share button sends it plus the previous session's file (handy after a
+crash). The files live in the app container under
+`Library/Application Support/Deezit/`. With a Mac, Console.app also shows
+everything: filter `subsystem:com.pisknk.deezit`.
 
 ## Layout
 
 ```
 Tweak.x                     entry point (%ctor)
+DZLog.h / DZDebugLog.*      logging: os_log + in-app ring + log files
 DZPrefs.*                   NSUserDefaults suite + atomic mirror for the audio thread
 DZAudioParams.h             plain-C params struct shared with the DSP
 DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / Nightcore
 DZDSP.*                     engine-agnostic DSP core (C)
-DZAudioHook.*               audio backend selection (RemoteIO / AudioQueue-style / AVPlayer / AVAudioEngine / SampleBuffer)
+DZAudioHook.x               AVAudioEngine backend: splices varispeed + reverb before the output node
+DZProbes.x                  runtime probes (which player / settings screens appear)
 DZSettingsViewController.*  settings page
-DZSettingsEntry.*           how the page is opened
+DZDebugViewController.*     debug panel + toast banner
+DZSettingsEntry.*           gestures that open the pages
 tools/analyze_ipa.py        IPA analyser (stdlib-only Python)
 docs/ANALYSIS.md            findings + hook decision table
 ```

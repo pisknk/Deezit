@@ -278,10 +278,22 @@ Deezer's binary and its embedded frameworks, not calls Apple frameworks make
 internally. That is enough when Deezer itself calls `AudioUnitSetProperty` /
 `AudioQueueNewOutput`, which the "binary that owns playback" row confirms.
 
-## Code that is waiting on this
+## Code built on this
 
-- `DZAudioHook.m`: `kDZChosenBackend` (currently `None`, so the skeleton never
-  touches audio)
-- `DZDSP.c`: the varispeed resampler and reverb (currently pass-through)
-- `DZSettingsEntry.m`: the Settings-row and Now Playing entry points (currently
-  a temporary three-finger long press)
+- `DZAudioHook.x`: the AVAudioEngine backend recommended above. It hooks
+  `-connect:to:format:`, `-prepare` and `-startAndReturnError:`, and splices
+  `AVAudioUnitVarispeed` + Apple Reverb2 (`'rvb2'`, so room size and damping
+  are real parameters) between whatever feeds `outputNode` and the output.
+  Every graph edit is in `@try`; on failure, Deezer's own connection is
+  restored. The units only bypass when the effect is off. **Not yet tested on a
+  device.**
+- `DZProbes.x` + the backend's graph log answer the open questions above at
+  runtime. The debug panel (three-finger double tap) shows which player /
+  settings controllers appear (with parents and presenter) and each engine's
+  full graph (`output <- … <- AVAudioPlayerNode`, plus every attached node).
+- Kill switch: debug panel → ⋯ → "Turn audio hook off" (`audioHook` pref,
+  read at launch). With it off, no `AVAudioEngine` method is hooked.
+- Still waiting: the Settings-row and Now Playing entry points
+  (`DZSettingsEntry.m`, three-finger hold for now), to be placed once the
+  probe log confirms the classes. `DZDSP.c` stays pass-through, because the
+  AVAudioEngine backend uses Apple's units instead.

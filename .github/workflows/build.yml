@@ -1,7 +1,14 @@
 name: Build Deezit dylib
 
+# Theos on a macOS runner, as in pisknk/twenty-one-reborn and pisknk/CCBoost.
+# Artifacts: Deezit.dylib (inject with cyan / TrollFools) + a rootless .deb.
+
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - 'tools/**'
+      - '**.md'
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +18,7 @@ jobs:
 
     steps:
     - name: checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: setup theos
       run: |
@@ -36,28 +43,38 @@ jobs:
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "building $VERSION"
 
-    - name: build dylib
+    - name: build dylib + rootless deb
       run: |
-        make FINALPACKAGE=1 DEBUG=0
+        # the dylib is what cyan / TrollFools inject; the .deb is for
+        # rootless jailbreaks (cyan accepts it too)
+        make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 DEBUG=0
         mkdir -p artifacts
         cp .theos/obj/Deezit.dylib artifacts/Deezit.dylib
+        cp packages/*.deb artifacts/
 
     - name: verify dylib
       run: |
         cd artifacts
         file Deezit.dylib
+        lipo -archs Deezit.dylib | grep -q arm64
         otool -L Deezit.dylib
         # sideloaded = no Substrate/ElleKit on device: the dylib must only
-        # link system frameworks, or dyld aborts Deezer at launch
-        if otool -L Deezit.dylib | grep -qiE 'substrate|ellekit|libhooker'; then
+        # link system frameworks, or dyld aborts Deezer at launch.
+        # Check the real load commands only: `otool -L` also prints the
+        # dylib's own install name, which Theos sets to
+        # .../Library/MobileSubstrate/DynamicLibraries/Deezit.dylib and which
+        # made the old grep fail every build.
+        DEPS=$(otool -l Deezit.dylib | awk '/cmd LC_(LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/ {f=1} f && $1 == "name" {print $2; f=0}')
+        echo "linked libraries:"
+        echo "$DEPS"
+        if echo "$DEPS" | grep -iE 'substrate|ellekit|libhooker|substitute'; then
           echo "::error::Deezit.dylib links a hooking library; it would crash a sideloaded app"
           exit 1
         fi
-        lipo -archs Deezit.dylib | grep -q arm64
 
-    - name: upload dylib
+    - name: upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: Deezit-${{ env.VERSION }}
-        path: artifacts/Deezit.dylib
+        path: artifacts/
         retention-days: 30

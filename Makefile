@@ -3,8 +3,9 @@
 # The dylib is injected into a decrypted Deezer IPA (e.g. with cyan) and
 # sideloaded, so there is no Substrate/ElleKit on device: Logos uses the
 # "internal" generator (plain ObjC runtime swizzling) and nothing links
-# CydiaSubstrate. C-function hooks (if the audio path needs them) will use a
-# vendored fishhook, added once the analysis picks the backend.
+# CydiaSubstrate. The audio backend (AVAudioEngine, see docs/ANALYSIS.md) is
+# all ObjC hooks, so no fishhook either. CI checks the built dylib has no
+# Substrate/ElleKit dependency.
 
 TARGET := iphone:clang:latest:15.0
 # Third-party processes run the plain arm64 slice (App Store apps are not
@@ -17,11 +18,14 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = Deezit
 
 Deezit_FILES = Tweak.x \
+	DZDebugLog.m \
 	DZPrefs.m \
 	DZPresets.m \
 	DZDSP.c \
-	DZAudioHook.m \
+	DZAudioHook.x \
+	DZProbes.x \
 	DZSettingsViewController.m \
+	DZDebugViewController.m \
 	DZSettingsEntry.m
 Deezit_FRAMEWORKS = UIKit AVFoundation AudioToolbox
 DEEZIT_VERSION := $(shell sed -n 's/^Version: //p' control)

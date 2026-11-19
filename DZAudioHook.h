@@ -1,25 +1,25 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
-// Where the effect is spliced into Deezer's audio. Which one v1 uses is decided
-// by the IPA analysis (docs/ANALYSIS.md) - only one is active at a time.
+// Where the effect is spliced into Deezer's audio. docs/ANALYSIS.md picked
+// AVAudioEngine for Deezer 11.27.0; the other cases stay as documentation of
+// the alternatives (and for other apps / future Deezer versions).
 typedef NS_ENUM(NSInteger, DZAudioBackend) {
     DZAudioBackendNone = 0,
-    // Wrap the render callback of Deezer's RemoteIO / AUGraph output unit
-    // (via fishhook on AudioUnitSetProperty). Pulls speed*N source frames per
-    // N output frames -> true varispeed at the output, works for any decoder.
+    // Wrap the render callback of a RemoteIO / AUGraph output unit.
     DZAudioBackendRemoteIO,
-    // AVPlayer: rate + AVAudioTimePitchAlgorithmVarispeed for speed,
-    // MTAudioProcessingTap on the item's audioMix for reverb.
+    // AVPlayer: rate + Varispeed pitch algorithm, MTAudioProcessingTap reverb.
     DZAudioBackendAVPlayer,
-    // AVAudioEngine: AVAudioUnitVarispeed + DSP node inserted before the
-    // main mixer when Deezer builds its graph.
+    // AVAudioEngine: AVAudioUnitVarispeed + Apple Reverb2 spliced between
+    // Deezer's last node (its main mixer) and the engine's output node.
     DZAudioBackendAVAudioEngine,
-    // AVSampleBufferAudioRenderer: synchronizer rate + process buffers
-    // before -enqueueSampleBuffer:.
+    // AVSampleBufferAudioRenderer: synchronizer rate + buffer processing.
     DZAudioBackendSampleBufferRenderer,
 };
 
 void DZAudioInstall(void);
 DZAudioBackend DZAudioActiveBackend(void);
+// One line for the settings footer.
 NSString *DZAudioBackendDescription(void);
+// A few lines for the debug panel: engines seen / spliced, last error.
+NSString *DZAudioStatusSummary(void);
