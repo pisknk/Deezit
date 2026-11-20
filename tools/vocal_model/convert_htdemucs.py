@@ -8,19 +8,28 @@ Runs in CI (.github/workflows/vocal-model-htdemucs.yml) on a macOS runner.
 
 The network is cut at the spectrogram, so the STFT / iSTFT (complex numbers,
 which Core ML can't take) stay on the phone, where Deezit already computes a
-4096 / 1024 STFT:
+4096 / 1024 STFT. Per window of L samples (T = ceil(L / 1024) frames):
 
-  inputs   mix          float32 [1, 2, 343980]        stereo window, 7.8 s @ 44.1 kHz
-           spec         float32 [1, 4, 2048, 336]     Demucs' _spec(mix) as complex-as-
+  inputs   mix          float32 [1, 2, L]             stereo window @ 44.1 kHz
+           spec         float32 [1, 4, 2048, T]       Demucs' _spec(mix) as complex-as-
                                                       channels: L.re, L.im, R.re, R.im
-  outputs  vocals_spec  float32 [1, 4, 2048, 336]     spectral branch, same layout
-           vocals_wave  float32 [1, 2, 343980]        time branch
+  outputs  vocals_spec  float32 [1, 4, 2048, T]       spectral branch, same layout
+           vocals_wave  float32 [1, 2, L]             time branch
 
-  vocals = vocals_wave + _ispec(complex(vocals_spec), 343980)
+  vocals = vocals_wave + _ispec(complex(vocals_spec), L)
 
-The script checks that this split reproduces the full model's vocals exactly,
-then that Core ML (mlprogram, fp16, CPU + Neural Engine) stays close to
-PyTorch, and packs the .mlpackage as one Apple Archive the tweak downloads.
+Window length. Demucs runs this model on 7.8 s windows, but on an iPhone 13
+loading that took ~2.2 GB and got Deezer killed: the cross-transformer attends
+over every frequency x time position of the window, so its memory grows with
+the square of the window. The package therefore holds one Core ML function per
+window length (2.6, 3.9, 7.8 s; mlprogram multifunction, iOS 18, weights
+shared), and the phone's benchmark tries them shortest first. Shorter windows
+are not how Demucs was trained, so their quality still has to be judged.
+
+Checks: the split reproduces the full model exactly (at 7.8 s, the length the
+full model runs at), and Core ML (fp16) stays close to PyTorch for every
+window. The runner's memory for loading + running each function is reported
+(Mac CPU, so only a rough guide for the phone).
 """
 
 import argparse
@@ -28,6 +37,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -36,6 +46,7 @@ import numpy as np
 import torch
 
 SIG = "04573f0d"            # htdemucs_ft's vocals model (row [0, 0, 0, 1] of its bag weights)
+WINDOWS = (("w26", 2.6), ("w39", 3.9), ("w78", None))   # None: the training segment (7.8 s)
 
 
 def load_vocals_model():
@@ -143,38 +154,31 @@ def music_like(length, seed=0):
     return torch.from_numpy(y.astype(np.float32))[None]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="DeezitDemucs.mlpackage")
-    a = ap.parse_args()
+def rebuild(model, vs, vw, F, T, L):
+    out = vs.view(1, 1, 2, 2, F, T).permute(0, 1, 2, 4, 5, 3).contiguous()
+    return vw[0] + model._ispec(torch.view_as_complex(out)[:, 0], L)[0]
 
-    # nn.MultiheadAttention's fused fast path doesn't convert; use the plain ops
-    if hasattr(torch.backends, "mha"):
-        torch.backends.mha.set_fastpath_enabled(False)
 
-    model = load_vocals_model()
-    L = int(model.segment * model.samplerate)
+def convert_window(model, ct, name, seconds):
+    train = int(model.segment * model.samplerate)
+    L = train if seconds is None else int(round(seconds * model.samplerate))
     mix = music_like(L)
     with torch.no_grad():
-        z = model._spec(mix)
-        spec = model._magnitude(z)
+        spec = model._magnitude(model._spec(mix))
     T, F = spec.shape[-1], spec.shape[-2]
-    print("window %d samples, spec %s" % (L, tuple(spec.shape)))
+    print("== %s: %d samples (%.2f s), spec %s" % (name, L, L / model.samplerate, tuple(spec.shape)))
 
     core = Core(model).eval()
     with torch.no_grad():
-        full = model(mix)[0, model.sources.index("vocals")]
         vs, vw = core(mix, spec)
-        out = vs.view(1, 1, 2, 2, F, T).permute(0, 1, 2, 4, 5, 3).contiguous()
-        zout = torch.view_as_complex(out)[:, 0]
-        rebuilt = vw[0] + model._ispec(zout, L)[0]
-    err = (full - rebuilt).abs().max().item()
-    print("split check: full model vs core + iSTFT, max |diff| %.2e" % err)
-    print("::notice title=split check::max |diff| %.2e" % err)
-    if err > 1e-3:
-        sys.exit("the split doesn't reproduce the model")
+        rebuilt = rebuild(model, vs, vw, F, T, L)
+        if L == train:   # the full model pads shorter inputs to 7.8 s, so it's only comparable here
+            full = model(mix)[0, model.sources.index("vocals")]
+            err = (full - rebuilt).abs().max().item()
+            print("::notice title=split check::max |diff| %.2e" % err)
+            if err > 1e-3:
+                sys.exit("the split doesn't reproduce the model")
 
-    import coremltools as ct
     traced = torch.jit.trace(core, (mix, spec), check_trace=False)
     t0 = time.time()
     ml = ct.convert(
@@ -185,51 +189,91 @@ def main():
         convert_to="mlprogram",
         compute_precision=ct.precision.FLOAT16,
         compute_units=ct.ComputeUnit.CPU_AND_NE,
-        minimum_deployment_target=ct.target.iOS16,
+        minimum_deployment_target=ct.target.iOS18,    # multifunction; attention as one SDPA op
     )
     print("converted in %.0f s" % (time.time() - t0))
-    ml.short_description = "Demucs htdemucs_ft vocals model (Meta, MIT), split at the spectrogram, for Deezit Sing"
-    ml.author = "Meta AI (Demucs); converted for Deezit"
-    ml.license = "MIT"
-    ml.save(a.out)
+    path = name + ".mlpackage"
+    shutil.rmtree(path, ignore_errors=True)
+    ml.save(path)
 
     if sys.platform == "darwin":
-        t0 = time.time()
         res = ml.predict({"mix": mix.numpy(), "spec": spec.numpy()})
-        print("Core ML predict on the runner: %.2f s" % (time.time() - t0))
-        print("::notice title=runner predict::%.2f s per 7.8 s window (Mac, not the phone)" % (time.time() - t0))
         got = {}
-        for name, want in (("vocals_spec", vs), ("vocals_wave", vw)):
-            got[name] = np.asarray(res[name]).reshape(want.shape).astype(np.float32)
-            w = want.numpy()
-            rel = np.abs(got[name] - w).mean() / (np.abs(w).mean() + 1e-9)
-            # relative to the output itself: inflated when the input has little voice (fp16 noise / tiny signal)
-            print("::notice title=Core ML vs PyTorch %s::mean error %.3f of the output's own level" % (name, rel))
-            if not np.isfinite(got[name]).all():
-                sys.exit("Core ML output has NaN / inf (%s)" % name)
-        # What matters is what you'd hear: the rebuilt vocals' error against the mix level
+        for key, want in (("vocals_spec", vs), ("vocals_wave", vw)):
+            got[key] = np.asarray(res[key]).reshape(want.shape).astype(np.float32)
+            if not np.isfinite(got[key]).all():
+                sys.exit("Core ML output has NaN / inf (%s %s)" % (name, key))
         with torch.no_grad():
-            spec_ml = torch.from_numpy(got["vocals_spec"]).view(1, 1, 2, 2, F, T).permute(0, 1, 2, 4, 5, 3).contiguous()
-            vocals_ml = torch.from_numpy(got["vocals_wave"])[0] + model._ispec(torch.view_as_complex(spec_ml)[:, 0], L)[0]
+            vocals_ml = rebuild(model, torch.from_numpy(got["vocals_spec"]), torch.from_numpy(got["vocals_wave"]), F, T, L)
         err_db = 20 * math.log10(float((vocals_ml - rebuilt).pow(2).mean().sqrt()) / float(mix.pow(2).mean().sqrt()) + 1e-12)
-        print("::notice title=Core ML vs PyTorch rebuilt vocals::error %.1f dB below the mix" % -err_db)
+        print("::notice title=%s Core ML vs PyTorch::rebuilt vocals differ %.1f dB below the mix" % (name, -err_db))
         if err_db > -26:
-            sys.exit("Core ML rebuilt vocals differ from PyTorch by %.1f dB of the mix (need <= -26 dB)" % err_db)
+            sys.exit("%s: Core ML rebuilt vocals differ from PyTorch by %.1f dB of the mix (need <= -26 dB)" % (name, err_db))
+    del ml
+    return {"name": name, "seconds": round(L / model.samplerate, 3), "samples": L, "frames": T, "bins": F}
+
+
+MEASURE = r'''
+import resource, sys, time, numpy as np, coremltools as ct
+path, fn, L, T = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+rss = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0   # bytes on macOS
+base = rss()
+m = ct.models.MLModel(path, function_name=fn, compute_units=ct.ComputeUnit.CPU_AND_NE)
+loaded = rss()
+x = {"mix": np.random.rand(1, 2, L).astype(np.float32) * 0.2, "spec": np.random.rand(1, 4, 2048, T).astype(np.float32)}
+m.predict(x)
+t0 = time.time(); m.predict(x); dt = time.time() - t0
+print("%.0f %.0f %.2f" % (loaded - base, rss() - base, dt))
+'''
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default="DeezitDemucs.mlpackage")
+    a = ap.parse_args()
+
+    # nn.MultiheadAttention's fused fast path doesn't convert; use the plain ops
+    if hasattr(torch.backends, "mha"):
+        torch.backends.mha.set_fastpath_enabled(False)
+
+    import coremltools as ct
+    model = load_vocals_model()
+    functions = [convert_window(model, ct, name, seconds) for name, seconds in WINDOWS]
+
+    desc = ct.utils.MultiFunctionDescriptor()
+    for f in functions:
+        desc.add_function(f["name"] + ".mlpackage", src_function_name="main", target_function_name=f["name"])
+    desc.default_function_name = functions[0]["name"]
+    shutil.rmtree(a.out, ignore_errors=True)
+    ct.utils.save_multifunction(desc, a.out)
+    print("multifunction package: %.1f MB" % (sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(a.out) for f in fs) / 1e6))
+
+    if sys.platform == "darwin":
+        for f in functions:
+            r = subprocess.run([sys.executable, "-c", MEASURE, a.out, f["name"], str(f["samples"]), str(f["frames"])],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print("::warning title=%s runner memory::measurement failed: %s" % (f["name"], (r.stderr or "")[-500:].replace("\n", " ")))
+                continue
+            load_mb, run_mb, secs = r.stdout.split()[-3:]
+            f["runner_load_mb"], f["runner_run_mb"] = float(load_mb), float(run_mb)
+            print("::notice title=%s on the runner (Mac CPU)::%s s window: load +%s MB, load + run +%s MB, %s s per run" % (
+                f["name"], f["seconds"], load_mb, run_mb, secs))
 
     archive = a.out + ".aar"
     subprocess.run(["aa", "archive", "-d", a.out, "-o", archive], check=True)
     digest = hashlib.sha256(open(archive, "rb").read()).hexdigest()
     meta = {
-        "model": "htdemucs_ft-vocals", "signature": SIG, "file": os.path.basename(archive), "format": "aar-mlpackage",
-        "samples": L, "frames": T, "bins": F, "n_fft": model.nfft, "hop": model.hop_length, "sample_rate": model.samplerate,
-        "inputs": {"mix": list(mix.shape), "spec": list(spec.shape)},
-        "outputs": {"vocals_spec": list(spec.shape), "vocals_wave": list(mix.shape)},
+        "model": "htdemucs_ft-vocals", "signature": SIG, "file": os.path.basename(archive), "format": "aar-mlpackage-multifunction",
+        "n_fft": model.nfft, "hop": model.hop_length, "sample_rate": model.samplerate,
+        "functions": functions,
         "bytes": os.path.getsize(archive), "sha256": digest,
     }
     with open("DeezitDemucs.json", "w") as fh:
         json.dump(meta, fh, indent=1)
     print("wrote %s (%.1f MB), sha256 %s" % (archive, os.path.getsize(archive) / 1e6, digest))
-    print("::notice title=model::%s %.1f MB" % (os.path.basename(archive), os.path.getsize(archive) / 1e6))
+    print("::notice title=model::%s %.1f MB, windows %s" % (
+        os.path.basename(archive), os.path.getsize(archive) / 1e6, ", ".join("%s s" % f["seconds"] for f in functions)))
 
 
 if __name__ == "__main__":

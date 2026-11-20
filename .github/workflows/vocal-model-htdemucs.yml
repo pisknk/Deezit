@@ -2,7 +2,7 @@ name: Build HT-Demucs model (experimental)
 
 # Converts the vocals model of Demucs' htdemucs_ft (Meta, MIT) to Core ML for
 # Deezit's on-device benchmark, and publishes it on the
-# `vocal-model-htdemucs-v1` release. Runs when its converter changes, or by
+# `vocal-model-htdemucs-v2` release. Runs when its converter changes, or by
 # hand from the Actions tab.
 
 on:
@@ -59,7 +59,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=vocal-model-htdemucs-v1
+          TAG=vocal-model-htdemucs-v2
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --target "${{ github.sha }}" --title "Deezit HT-Demucs model (experimental)" \
               --notes "The vocals model of Demucs htdemucs_ft (Meta, MIT licence), split at the spectrogram and converted to Core ML for Deezit's on-device benchmark."
