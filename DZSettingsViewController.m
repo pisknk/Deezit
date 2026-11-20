@@ -252,10 +252,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
                    @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
                    @"Turn it up or down with Playback Controls → Sing → Vocals.";
         case DZSectionDemucs:
-            return @"A bigger, cleaner vocal model (Demucs htdemucs_ft vocals, Meta, MIT licence; about 85 MB). For now it is only "
-                   @"benchmarked: it times the model on this iPhone and shows how much runs on the Neural Engine, which Sing needs "
-                   @"to keep working with the screen locked. Playback keeps using Spleeter. It tries 2.6, 3.9 and 7.8 s windows, "
-                   @"shortest first, and skips a longer one when there isn't enough memory for it. Needs iOS 18. Takes a minute or two. "
+            return @"A bigger, cleaner vocal model (Demucs htdemucs_ft vocals, Meta, MIT licence; about 160 MB: one "
+                   @"model for 2.6 s windows, one for 3.9 s). For now it is only benchmarked: it times the model on this iPhone and "
+                   @"shows how much runs on the Neural Engine, which Sing needs to keep working with the screen locked. Playback keeps "
+                   @"using Spleeter. Shortest window first; a longer one is skipped when there isn't enough memory for it. Takes a minute or two. "
                    @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";
         case DZSectionLockScreen:
             return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
