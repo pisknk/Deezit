@@ -126,6 +126,68 @@ def convert_onnx(ct, onnx_file, dim_f, precision, out):
     return out
 
 
+def diagnose(ct, onnx_file, x, ref, label):
+    """Where does the conversion go wrong? PyTorch (onnx2torch) vs ONNX Runtime,
+    then Core ML fp32 vs PyTorch at every layer: the first layers that differ."""
+    import copy
+    import torch
+    from onnx2torch import convert
+    from torch.fx import Interpreter
+
+    gm = convert(onnx_file).eval()
+    xt = torch.from_numpy(x)
+    with torch.no_grad():
+        tout = gm(xt).numpy()
+    print("::notice title=%s diagnosis: PyTorch vs ONNX::SNR %.1f dB" % (label, snr_db(ref, tout)))
+
+    vals = {}
+
+    class Capture(Interpreter):
+        def run_node(self, n):
+            r = super().run_node(n)
+            if isinstance(r, torch.Tensor) and r.dim() >= 2 and r.is_floating_point():
+                vals[n.name] = r.detach().numpy().copy()
+            return r
+
+    with torch.no_grad():
+        Capture(gm).run(xt)
+    order = [n for n in gm.graph.nodes if n.name in vals]
+    info = {n.name: "%s %s" % (n.op, n.target if n.op != "call_module" else type(gm.get_submodule(n.target)).__name__ + " " + str(n.target))
+            for n in order}
+    g2 = copy.deepcopy(gm)
+    keep = set(vals)
+    sel = [n for n in g2.graph.nodes if n.name in keep]
+    out = [n for n in g2.graph.nodes if n.op == "output"][0]
+    out.args = (tuple(sel),)
+    g2.graph.lint()
+    g2.recompile()
+    traced = torch.jit.trace(g2.eval(), xt, check_trace=False, strict=False)
+    ml = ct.convert(traced, convert_to="mlprogram",
+                    inputs=[ct.TensorType(name="input", shape=tuple(x.shape), dtype=np.float32)],
+                    compute_precision=ct.precision.FLOAT32, compute_units=ct.ComputeUnit.CPU_ONLY,
+                    minimum_deployment_target=ct.target.iOS16)
+    names = [o.name for o in ml.get_spec().description.output]
+    res = ml.predict({"input": x})
+    rows = []
+    for n, oname in zip(sel, names):
+        want = vals[n.name]
+        got = np.asarray(res[oname]).reshape(want.shape) if np.asarray(res[oname]).size == want.size else None
+        db = snr_db(want, got) if got is not None else -999.0
+        rows.append((n.name, info[n.name], tuple(want.shape), db))
+    bad = [r for r in rows if r[3] < 60]
+    lines = ["%d layers compared; %d below 60 dB" % (len(rows), len(bad))]
+    for r in bad[:12]:
+        lines.append("%s | %s | %s | %.1f dB" % r)
+    if bad:
+        i = rows.index(bad[0])
+        lines.append("before the first bad one:")
+        for r in rows[max(0, i - 3):i]:
+            lines.append("%s | %s | %s | %.1f dB" % r)
+    text = "\n".join(lines)
+    print(text)
+    print("::notice title=%s diagnosis: Core ML fp32 vs PyTorch per layer::%s" % (label, text.replace("%", "%25").replace("\n", "%0A")))
+
+
 def check(ct, pkg, x, ref, units):
     ml = ct.models.MLModel(pkg, compute_units=units)
     dtype = np.float16 if ml.get_spec().description.input[0].type.multiArrayType.dataType == 65552 else np.float32
@@ -164,7 +226,7 @@ def main():
                 results[(tag, units_name)] = check(ct, path, x, ref, units)
         summary = ", ".join("%s on %s %.1f dB" % (t, u, v) for (t, u), v in results.items())
         print("::notice title=%s vs ONNX (SNR)::%s" % (label, summary))
-        os.remove(onnx_file)
+        onnx_file_kept = onnx_file
 
         # first fp16 candidate whose worst case clears the bar
         chosen = None
@@ -174,6 +236,10 @@ def main():
                 chosen = (tag, path, worst)
                 break
         if not chosen:
+            try:
+                diagnose(ct, onnx_file_kept, x, ref, label)
+            except Exception as e:
+                print("::warning title=%s diagnosis failed::%s: %s" % (label, type(e).__name__, str(e)[:800].replace("\n", " ")))
             sys.exit("%s: no fp16 Core ML version stays within 35 dB of ONNX: %s" % (label, summary))
         print("::notice title=%s chosen::%s (worst %.1f dB)" % (label, chosen[0], chosen[2]))
         if chosen[1] != pkg:
@@ -181,6 +247,7 @@ def main():
             shutil.move(chosen[1], pkg)
         for extra in (ours16, ours32):
             shutil.rmtree(extra, ignore_errors=True)
+        os.remove(onnx_file)
 
         r = subprocess.run([sys.executable, "-c", MEASURE, pkg, str(dim_f)], capture_output=True, text=True)
         entry = {"name": name, "label": label, "seconds": round(FRAMES * HOP / RATE, 3), "frames": FRAMES,
