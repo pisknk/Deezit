@@ -7,7 +7,7 @@
 
 NSString *const DZDemucsChangedNotification = @"DZDemucsChangedNotification";
 
-static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-htdemucs-v2/";
+static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-htdemucs-v3/";
 static NSString *const kDZMeta = @"DeezitDemucs.json";
 
 static NSObject *sLock;
@@ -26,7 +26,7 @@ static NSURL *dir(void) {
     return d;
 }
 static NSURL *compiledURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.mlmodelc" isDirectory:YES]; }
-static NSURL *packageURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.mlpackage" isDirectory:YES]; }
+static NSURL *stagingURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.staging.mlmodelc" isDirectory:YES]; }
 static NSURL *archiveURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.download.aar"]; }
 static NSURL *metaURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.json"]; }
 static NSURL *metaPendingURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.download.json"]; }
@@ -47,7 +47,7 @@ static void setup(void) {
         sLock = [NSObject new];
         BOOL have = [NSFileManager.defaultManager fileExistsAtPath:compiledURL().path];
         if (have && !functionsList().count) {
-            // the first, single-window (7.8 s) model: replaced by the multi-window one
+            // an older download (single 7.8 s window, or compiled on the phone): replaced
             [NSFileManager.defaultManager removeItemAtURL:compiledURL() error:nil];
             [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
             have = NO;
@@ -111,18 +111,19 @@ static BOOL extract(NSURL *archive, NSURL *dest) {
 static void install(void) {
     setState(DZDemucsPreparing, nil);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (!extract(archiveURL(), packageURL())) {
-            [NSFileManager.defaultManager removeItemAtURL:archiveURL() error:nil];
+        // The archive holds the model already compiled (on the Mac, as Xcode
+        // does): compiling the multifunction package on the phone gave a model
+        // whose functions couldn't be loaded by name.
+        BOOL ok = extract(archiveURL(), stagingURL());
+        [NSFileManager.defaultManager removeItemAtURL:archiveURL() error:nil];
+        if (!ok) {
+            [NSFileManager.defaultManager removeItemAtURL:stagingURL() error:nil];
             setState(DZDemucsFailed, @"couldn't unpack the model archive");
             return;
         }
-        [NSFileManager.defaultManager removeItemAtURL:archiveURL() error:nil];
         NSError *err = nil;
-        NSURL *compiled = [MLModel compileModelAtURL:packageURL() error:&err];
-        [NSFileManager.defaultManager removeItemAtURL:packageURL() error:nil];
-        if (!compiled) { setState(DZDemucsFailed, [@"compile failed: " stringByAppendingString:err.localizedDescription ?: @"?"]); return; }
         [NSFileManager.defaultManager removeItemAtURL:compiledURL() error:nil];
-        if (![NSFileManager.defaultManager moveItemAtURL:compiled toURL:compiledURL() error:&err]) {
+        if (![NSFileManager.defaultManager moveItemAtURL:stagingURL() toURL:compiledURL() error:&err]) {
             setState(DZDemucsFailed, err.localizedDescription ?: @"couldn't store the model");
             return;
         }
@@ -223,7 +224,9 @@ void DZDemucsDelete(void) {
 static NSArray<NSDictionary *> *functionsList(void) {
     NSData *data = [NSData dataWithContentsOfURL:metaURL()];
     NSDictionary *meta = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    NSArray *list = [meta isKindOfClass:[NSDictionary class]] ? meta[@"functions"] : nil;
+    NSString *format = [meta isKindOfClass:[NSDictionary class]] ? meta[@"format"] : nil;
+    if (![format isKindOfClass:[NSString class]] || ![format hasPrefix:@"aar-mlmodelc"]) return @[];
+    NSArray *list = meta[@"functions"];
     if (![list isKindOfClass:[NSArray class]]) return @[];
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
     for (NSDictionary *f in list) {
@@ -398,7 +401,7 @@ static void installExceptionNote(void) {
 
 // One window: load, first run, 4 timed runs. Returns its result line, or nil
 // with *failure set. *usedMB: the most memory it took (free before - lowest).
-static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failure) {
+static NSString *benchWindow(NSDictionary *fn, BOOL isDefault, double *usedMB, NSString **failure) {
     NSString *name = fn[@"name"];
     double seconds = [fn[@"seconds"] doubleValue];
     NSString *label = [NSString stringWithFormat:@"%.1f s window", seconds];
@@ -413,6 +416,14 @@ static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failur
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         MLModel *model;
         @autoreleasepool { model = [MLModel modelWithContentsOfURL:compiledURL() configuration:config(name) error:&err]; }
+        NSString *note = @"";
+        if (!model && isDefault) {
+            // the package's default function is this window: it loads without a name too
+            NSString *byName = err.localizedDescription ?: @"?";
+            err = nil;
+            @autoreleasepool { model = [MLModel modelWithContentsOfURL:compiledURL() configuration:config(nil) error:&err]; }
+            if (model) note = [NSString stringWithFormat:@" (loaded as the default function; by name: %@)", byName];
+        }
         double loadS = CFAbsoluteTimeGetCurrent() - t0;
         double afterLoad = freeMB();
         NSString *problem = nil;
@@ -451,9 +462,9 @@ static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failur
         NSString *verdict = median < 0 ? @"no timing" :
             share <= 0.4 ? @"fast enough for live Sing" : share <= 0.8 ? @"borderline for live Sing" : @"too slow for live Sing";
         return [NSString stringWithFormat:@"%@: %.0f ms per window (median of %lu), %.0f%% of the time live use allows - %@\n"
-                @"   memory: %.0f MB to load, %.0f MB at most · load %.1f s, first run %.1f s",
+                @"   memory: %.0f MB to load, %.0f MB at most · load %.1f s, first run %.1f s%@",
                 label, median, (unsigned long)runs.count, share * 100, verdict,
-                before - afterLoad, *usedMB, loadS, firstS];
+                before - afterLoad, *usedMB, loadS, firstS, note];
     }
 }
 
@@ -501,7 +512,7 @@ void DZDemucsRunBenchmark(void) {
                 }
                 double used = 0;
                 NSString *failure = nil;
-                NSString *line = benchWindow(fn, &used, &failure);
+                NSString *line = benchWindow(fn, fn == fns.firstObject, &used, &failure);
                 if (!line) { [lines addObject:failure]; addDone(failure); break; }
                 [lines addObject:line];
                 addDone(line);
