@@ -145,7 +145,7 @@ def diagnose(ct, onnx_file, x, ref, label):
     class Capture(Interpreter):
         def run_node(self, n):
             r = super().run_node(n)
-            if isinstance(r, torch.Tensor) and r.dim() >= 2 and r.is_floating_point():
+            if n.op.startswith("call_") and isinstance(r, torch.Tensor) and r.dim() >= 2 and r.is_floating_point():
                 vals[n.name] = r.detach().numpy().copy()
             return r
 
