@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   model:
-    runs-on: macos-14   # Apple silicon: Core ML can run the model to check it
+    runs-on: macos-latest   # Apple silicon: Core ML can run the model to check it
 
     steps:
       - name: checkout code
