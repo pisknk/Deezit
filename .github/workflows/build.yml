@@ -44,10 +44,21 @@ jobs:
         echo "building $VERSION"
 
     - name: build dylib + rootless deb
+      shell: bash
       run: |
         # the dylib is what cyan / TrollFools inject; the .deb is for
         # rootless jailbreaks (cyan accepts it too)
-        make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 DEBUG=0
+        set +e
+        make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 DEBUG=0 2>&1 | tee build.log
+        status=${PIPESTATUS[0]}
+        set -e
+        if [ "$status" -ne 0 ]; then
+          # compiler errors as an annotation (readable without signing in)
+          grep -E "error:|Error [0-9]" build.log | head -n 30 > errors.txt || true
+          [ -s errors.txt ] || tail -n 30 build.log > errors.txt
+          python3 -c "import sys; t=open('errors.txt').read().replace('%','%25').replace('\r','').replace('\n','%0A'); print('::error title=build failed::' + t)"
+          exit "$status"
+        fi
         mkdir -p artifacts
         cp .theos/obj/Deezit.dylib artifacts/Deezit.dylib
         cp packages/*.deb artifacts/

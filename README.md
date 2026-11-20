@@ -106,6 +106,23 @@ Buffers pass through untouched until the player is well fed; if its queue
 ever runs low, Deezit lets everything through unprocessed for the rest of
 that track. The debug panel's `sing:` line shows what it is doing.
 
+### HT-Demucs (experimental)
+
+Settings → **HT-Demucs** downloads a bigger, cleaner vocal model: the vocals
+model of Demucs `htdemucs_ft` (Meta, MIT licence), built by
+`tools/vocal_model/convert_htdemucs.py` in
+`.github/workflows/vocal-model-htdemucs.yml`. The network is cut at the
+spectrogram (inputs `mix` + `spec`, outputs `vocals_spec` + `vocals_wave`) so the
+STFT stays on the phone; CI checks the split reproduces Demucs exactly and
+that Core ML matches PyTorch. It ships as an Apple Archive of the
+`.mlpackage`, unpacked and compiled on the phone.
+
+For now it is only **benchmarked** (Run benchmark): time per 7.8 s window on
+this iPhone, and Core ML's compute plan (iOS 17.4+) showing the share of the
+work on the Neural Engine / CPU / GPU. Sing must stay off the GPU to work
+with the screen locked. Playback keeps using Spleeter until the numbers say
+HT-Demucs can keep up.
+
 ## Animated lock-screen covers
 
 On iOS 26 and later, Deezit shows the Apple Music motion cover of the album

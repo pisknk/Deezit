@@ -3,6 +3,7 @@
 #import "DZPresets.h"
 #import "DZAudioHook.h"
 #import "DZVocalModel.h"
+#import "DZDemucsModel.h"
 
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
@@ -21,6 +22,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionReverb,      // controls
     DZSectionReset,       // controls
     DZSectionModel,       // settings: Sing model download
+    DZSectionDemucs,      // settings: experimental HT-Demucs model + benchmark
     DZSectionLockScreen,  // settings
     DZSectionCount,
 };
@@ -120,6 +122,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionReset:
             return [self isControls];
         case DZSectionModel:
+        case DZSectionDemucs:
         case DZSectionLockScreen:
             return ![self isControls];
     }
@@ -142,6 +145,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(modelChanged)
                                                  name:DZVocalModelChangedNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(demucsChanged)
+                                                 name:DZDemucsChangedNotification
                                                object:nil];
 }
 
@@ -174,6 +181,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
     [self reload:sections];
 }
 
+- (void)demucsChanged {
+    [self reload:[NSIndexSet indexSetWithIndex:DZSectionDemucs]];
+}
+
 - (void)reloadSliders {
     NSMutableIndexSet *s = [NSMutableIndexSet indexSetWithIndex:DZSectionSpeed];
     [s addIndex:DZSectionReverb];
@@ -195,6 +206,12 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionReverb: return 3;
         case DZSectionReset: return 1;
         case DZSectionModel: return DZVocalModelGetState() == DZVocalModelCompiling ? 1 : 2;
+        case DZSectionDemucs: {
+            DZDemucsState st = DZDemucsGetState();
+            if (st == DZDemucsPreparing) return 1;
+            if (st != DZDemucsReady) return 2;                          // status, download / cancel
+            return DZDemucsBenchmarkResult() ? 4 : 3;                   // + benchmark, + result
+        }
         case DZSectionLockScreen: return 1;
     }
     return 0;
@@ -208,6 +225,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionSpeed: return @"Speed";
         case DZSectionReverb: return @"Reverb";
         case DZSectionModel: return @"Sing";
+        case DZSectionDemucs: return @"HT-Demucs (experimental)";
         case DZSectionLockScreen: return @"Lock Screen";
     }
     return nil;
@@ -233,6 +251,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
             return @"Sing removes vocals with Spleeter (2-stems, by Deezer Research, MIT licence), running on the iPhone's "
                    @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
                    @"Turn it up or down with Playback Controls → Sing → Vocals.";
+        case DZSectionDemucs:
+            return @"A bigger, cleaner vocal model (Demucs htdemucs_ft vocals, Meta, MIT licence; about 85 MB). For now it is only "
+                   @"benchmarked: it times the model on this iPhone and shows how much runs on the Neural Engine, which Sing needs "
+                   @"to keep working with the screen locked. Playback keeps using Spleeter. The benchmark takes up to a minute.";
         case DZSectionLockScreen:
             return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
                    @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
@@ -362,6 +384,36 @@ typedef NS_ENUM(NSInteger, DZSection) {
             c.contentConfiguration = cfg;
             return c;
         }
+        case DZSectionDemucs: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            DZDemucsState st = DZDemucsGetState();
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            if (ip.row == 0) {
+                cfg = [UIListContentConfiguration valueCellConfiguration];
+                cfg.text = @"HT-Demucs";
+                cfg.secondaryText = DZDemucsStatusText();
+                cfg.image = [UIImage systemImageNamed:@"waveform.badge.magnifyingglass"];
+            } else if (ip.row == 1) {
+                cfg.text = st == DZDemucsDownloading ? @"Cancel download"
+                         : st == DZDemucsReady ? @"Delete model"
+                         : st == DZDemucsFailed ? @"Try again" : @"Download";
+                cfg.textProperties.color = st == DZDemucsReady ? UIColor.systemRedColor : c.tintColor;
+                c.selectionStyle = UITableViewCellSelectionStyleDefault;
+            } else if (ip.row == 2) {
+                BOOL running = DZDemucsBenchmarkRunning();
+                cfg.text = running ? @"Running benchmark…" : @"Run benchmark";
+                cfg.textProperties.color = running ? UIColor.secondaryLabelColor : c.tintColor;
+                c.selectionStyle = running ? UITableViewCellSelectionStyleNone : UITableViewCellSelectionStyleDefault;
+            } else {
+                cfg = [UIListContentConfiguration subtitleCellConfiguration];
+                cfg.text = @"Last benchmark";
+                cfg.secondaryText = DZDemucsBenchmarkResult();
+                cfg.secondaryTextProperties.numberOfLines = 0;
+                cfg.secondaryTextProperties.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+            }
+            c.contentConfiguration = cfg;
+            return c;
+        }
         case DZSectionLockScreen: {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
@@ -462,6 +514,16 @@ typedef NS_ENUM(NSInteger, DZSection) {
             case DZVocalModelReady: [self confirmDeleteModel]; break;
             case DZVocalModelCompiling: break;
         }
+    } else if (ip.section == DZSectionDemucs && ip.row == 1) {
+        switch (DZDemucsGetState()) {
+            case DZDemucsNotInstalled:
+            case DZDemucsFailed: DZDemucsDownload(); break;
+            case DZDemucsDownloading: DZDemucsCancel(); break;
+            case DZDemucsReady: DZDemucsDelete(); break;
+            case DZDemucsPreparing: break;
+        }
+    } else if (ip.section == DZSectionDemucs && ip.row == 2) {
+        DZDemucsRunBenchmark();
     }
 }
 
