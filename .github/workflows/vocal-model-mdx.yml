@@ -1,0 +1,74 @@
+name: Build MDX-Net models (experimental)
+
+# Fetches the UVR MDX-Net vocal models (MIT; Core ML conversion from
+# huggingface.co/gyoom/UVR-MDX-CoreML, pinned), checks them against the
+# original UVR .onnx files and publishes them on the `vocal-model-mdx-v1`
+# release for Deezit's on-device benchmark. Runs when its script changes, or
+# by hand from the Actions tab.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/vocal_model/fetch_mdx.py'
+      - '.github/workflows/vocal-model-mdx.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  model:
+    runs-on: macos-latest
+
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v5
+
+      - name: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy==1.26.4" "coremltools==8.1" "onnxruntime==1.19.2"
+
+      - name: fetch and verify
+        shell: bash
+        run: |
+          set +e
+          python tools/vocal_model/fetch_mdx.py 2>&1 | tee fetch.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            python3 - <<'PY'
+          text = open("fetch.log", errors="replace").read().replace("\r", "\n")
+          lines = [l for l in text.split("\n") if l.strip()]
+          tail = "\n".join(lines[-40:])
+          for i in range(0, len(tail), 3500):
+              chunk = tail[i:i + 3500].replace("%", "%25").replace("\n", "%0A")
+              print("::error title=fetch failed (%d)::%s" % (i // 3500 + 1, chunk))
+          PY
+            exit "$status"
+          fi
+
+      - name: publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=vocal-model-mdx-v1
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "${{ github.sha }}" --title "Deezit MDX-Net models (experimental)" \
+              --notes "UVR MDX-Net vocal models (UVR-MDXNET 9482 by Anjok07, UVR-MDX-NET Voc FT by Kimberley Jensen; MIT, via TRvlvr/model_repo), Core ML fp16 conversion by gyoom (huggingface.co/gyoom/UVR-MDX-CoreML, MIT). Re-hosted for Deezit's on-device benchmark after checking each against the original UVR .onnx. Licence: LICENSE-UVR-MDX-CoreML.txt."
+          fi
+          gh release upload "$TAG" DeezitMDX-*.mlpackage.aar DeezitMDX.json LICENSE-UVR-MDX-CoreML.txt --clobber
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeezitMDX
+          path: |
+            DeezitMDX-*.mlpackage.aar
+            DeezitMDX.json
+            LICENSE-UVR-MDX-CoreML.txt
+          retention-days: 30
