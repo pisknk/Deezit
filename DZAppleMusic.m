@@ -342,12 +342,80 @@ static void editorialFor(NSString *albumID, void (^done)(BOOL ok, NSURL *tall, N
     });
 }
 
+// Apple Music often has several albums with the same name (re-issues, clean /
+// explicit, regional editions) and only one of them carries the motion cover:
+// on device "Radical Optimism" matched 1745741774 (no cover) while 1734980417
+// has one. So ask the catalog's own search with editorialVideo, and among the
+// same artist's albums of that name take one that actually has a cover
+// (exact name first, then the name without "(Deluxe)", " - Single" etc).
+static void searchMotionAlbum(NSString *artist, NSString *album, DZMotionCoverResult done) {
+    NSString *primary = primaryArtist(artist);
+    NSString *wantArtist = normalize(primary), *wantExact = normalize(album), *wantBase = normalizeAlbum(album);
+    if (!wantArtist.length || !wantBase.length) { done(nil, nil, nil, @"no artist / album to search"); return; }
+    NSURLComponents *query = [NSURLComponents new];
+    query.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"term" value:[NSString stringWithFormat:@"%@ %@", primary, album]],
+        [NSURLQueryItem queryItemWithName:@"types" value:@"albums"],
+        [NSURLQueryItem queryItemWithName:@"limit" value:@"15"],
+        [NSURLQueryItem queryItemWithName:@"extend" value:@"editorialVideo"],
+    ];
+    catalogGet([@"search?" stringByAppendingString:query.percentEncodedQuery ?: @""], NO, ^(NSData *data, NSInteger status) {
+        if (status != 200) { done(nil, nil, nil, [NSString stringWithFormat:@"catalog search HTTP %ld", (long)status]); return; }
+        NSDictionary *json = jsonObject(data);
+        NSDictionary *results = [json isKindOfClass:[NSDictionary class]] ? json[@"results"] : nil;
+        NSDictionary *albums = [results isKindOfClass:[NSDictionary class]] ? results[@"albums"] : nil;
+        NSArray *list = [albums isKindOfClass:[NSDictionary class]] ? albums[@"data"] : nil;
+        NSString *bestID = nil, *bestName = nil;
+        NSURL *bestTall = nil, *bestSquare = nil;
+        int bestRank = 0;
+        NSUInteger sameName = 0;
+        for (NSDictionary *a in [list isKindOfClass:[NSArray class]] ? list : @[]) {
+            NSDictionary *attrs = [a isKindOfClass:[NSDictionary class]] ? a[@"attributes"] : nil;
+            if (![attrs isKindOfClass:[NSDictionary class]] || !artistMatches(attrs[@"artistName"], wantArtist)) continue;
+            NSString *name = [attrs[@"name"] isKindOfClass:[NSString class]] ? attrs[@"name"] : @"";
+            BOOL exact = [normalize(name) isEqualToString:wantExact];
+            if (!exact && ![normalizeAlbum(name) isEqualToString:wantBase]) continue;
+            sameName++;
+            NSDictionary *ev = attrs[@"editorialVideo"];
+            if (![ev isKindOfClass:[NSDictionary class]]) continue;
+            NSURL *tall = videoIn(ev, @[@"motionDetailTall", @"motionTallVideo3x4"]);
+            NSURL *square = videoIn(ev, @[@"motionDetailSquare", @"motionSquareVideo1x1"]);
+            if (!tall && !square) continue;
+            int rank = (exact ? 4 : 2) + (tall ? 1 : 0);
+            if (rank <= bestRank) continue;
+            bestRank = rank;
+            bestID = [a[@"id"] description];
+            bestName = name;
+            bestTall = tall;
+            bestSquare = square;
+        }
+        if (bestID.length) {
+            done(bestID, bestTall, bestSquare, [NSString stringWithFormat:@"catalog search -> \"%@\" (%@, %lu same-name album%@): tall %@, square %@",
+                                                bestName, bestID, (unsigned long)sameName, sameName == 1 ? @"" : @"s",
+                                                bestTall ? @"yes" : @"no", bestSquare ? @"yes" : @"no"]);
+        } else {
+            done(nil, nil, nil, [NSString stringWithFormat:@"catalog search: %lu same-name album%@, none with a motion cover",
+                                 (unsigned long)sameName, sameName == 1 ? @"" : @"s"]);
+        }
+    });
+}
+
 void DZAppleMotionCover(NSString *title, NSString *artist, NSString *album, NSTimeInterval duration, DZMotionCoverResult done) {
-    matchAlbum(title, artist, album ?: @"", duration, ^(NSString *albumID, NSString *matchNote) {
-        if (!albumID.length) { done(nil, nil, nil, matchNote); return; }
-        editorialFor(albumID, ^(BOOL ok, NSURL *tall, NSURL *square, NSString *what) {
-            done(ok ? albumID : nil, tall, square, [NSString stringWithFormat:@"%@; album %@: %@", matchNote, albumID, what]);
+    void (^byItunesMatch)(NSString *) = ^(NSString *searchNote) {
+        matchAlbum(title, artist, album ?: @"", duration, ^(NSString *albumID, NSString *matchNote) {
+            if (!albumID.length) { done(nil, nil, nil, [NSString stringWithFormat:@"%@; %@", searchNote, matchNote]); return; }
+            editorialFor(albumID, ^(BOOL ok, NSURL *tall, NSURL *square, NSString *what) {
+                done(ok ? albumID : nil, tall, square,
+                     [NSString stringWithFormat:@"%@; %@; album %@: %@", searchNote, matchNote, albumID, what]);
+            });
         });
+    };
+    if (!album.length) { byItunesMatch(@"no album name to search"); return; }
+    searchMotionAlbum(artist, album, ^(NSString *albumID, NSURL *tall, NSURL *square, NSString *note) {
+        if (albumID && (tall || square)) { done(albumID, tall, square, note); return; }
+        // nothing with a cover under that name: the iTunes match (and, if that
+        // album has no cover either, the song's other releases) decide
+        byItunesMatch(note);
     });
 }
 
