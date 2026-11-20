@@ -22,10 +22,11 @@ Deezit_FILES = Tweak.x \
 	DZPrefs.m \
 	DZPresets.m \
 	DZDSP.c \
-	DZVocals.c \
-	DZVocalUnit.m \
 	DZAudioHook.x \
 	DZBufferProbe.x \
+	DZVocalModel.m \
+	DZSeparator.m \
+	DZSing.x \
 	DZProbes.x \
 	DZPlayerMenu.x \
 	DZAppleMusic.m \
@@ -34,7 +35,7 @@ Deezit_FILES = Tweak.x \
 	DZSettingsViewController.m \
 	DZDebugViewController.m \
 	DZSettingsEntry.m
-Deezit_FRAMEWORKS = UIKit QuartzCore AVFoundation AudioToolbox MediaPlayer
+Deezit_FRAMEWORKS = UIKit QuartzCore AVFoundation AudioToolbox MediaPlayer CoreML Accelerate
 DEEZIT_VERSION := $(shell sed -n 's/^Version: //p' control)
 Deezit_CFLAGS = -fobjc-arc -Wall -Wno-deprecated-declarations -DDEEZIT_VERSION=\"$(DEEZIT_VERSION)\"
 Deezit_LOGOS_DEFAULT_GENERATOR = internal

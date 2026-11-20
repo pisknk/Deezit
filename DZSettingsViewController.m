@@ -2,15 +2,26 @@
 #import "DZPrefs.h"
 #import "DZPresets.h"
 #import "DZAudioHook.h"
+#import "DZVocalModel.h"
 
+#ifndef DEEZIT_VERSION
+#define DEEZIT_VERSION "dev"
+#endif
+
+// One controller, two pages:
+//   Playback Controls (player ••• menu): everything that shapes the sound -
+//     Slowed + Reverb switch, Sing (vocals), presets, speed, reverb, reset
+//   Settings (three-finger hold): app-level things - the Sing model download
+//     and the lock-screen covers
 typedef NS_ENUM(NSInteger, DZSection) {
-    DZSectionEffect,
-    DZSectionSing,
-    DZSectionPresets,
-    DZSectionSpeed,
-    DZSectionReverb,
-    DZSectionLockScreen,
-    DZSectionReset,
+    DZSectionEffect,      // controls
+    DZSectionSing,        // controls: Vocals slider
+    DZSectionPresets,     // controls
+    DZSectionSpeed,       // controls
+    DZSectionReverb,      // controls
+    DZSectionReset,       // controls
+    DZSectionModel,       // settings: Sing model download
+    DZSectionLockScreen,  // settings
     DZSectionCount,
 };
 
@@ -95,6 +106,26 @@ typedef NS_ENUM(NSInteger, DZSection) {
     return nav;
 }
 
+- (BOOL)isControls {
+    return self.pageTitle != nil;
+}
+
+- (BOOL)shows:(NSInteger)section {
+    switch (section) {
+        case DZSectionEffect:
+        case DZSectionSing:
+        case DZSectionPresets:
+        case DZSectionSpeed:
+        case DZSectionReverb:
+        case DZSectionReset:
+            return [self isControls];
+        case DZSectionModel:
+        case DZSectionLockScreen:
+            return ![self isControls];
+    }
+    return NO;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.pageTitle ?: @"Deezit";
@@ -108,6 +139,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
                                              selector:@selector(prefsChanged)
                                                  name:DZPrefsChangedNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(modelChanged)
+                                                 name:DZVocalModelChangedNotification
+                                               object:nil];
 }
 
 - (void)dealloc {
@@ -118,24 +153,32 @@ typedef NS_ENUM(NSInteger, DZSection) {
     [self.navigationController dismissViewControllerAnimated:YES completion:nil];
 }
 
+- (void)reload:(NSIndexSet *)sections {
+    [UIView performWithoutAnimation:^{
+        [self.tableView reloadSections:sections withRowAnimation:UITableViewRowAnimationNone];
+    }];
+}
+
 - (void)prefsChanged {
     // Sliders update their own labels while dragging; only reload rows that
     // other controls can change (switch + preset checkmarks) to keep the
     // slider being dragged from being reset under the finger.
     NSMutableIndexSet *sections = [NSMutableIndexSet indexSetWithIndex:DZSectionPresets];
     [sections addIndex:DZSectionEffect];
-    [UIView performWithoutAnimation:^{
-        [self.tableView reloadSections:sections withRowAnimation:UITableViewRowAnimationNone];
-    }];
+    [self reload:sections];
+}
+
+- (void)modelChanged {
+    NSMutableIndexSet *sections = [NSMutableIndexSet indexSetWithIndex:DZSectionModel];
+    [sections addIndex:DZSectionSing];
+    [self reload:sections];
 }
 
 - (void)reloadSliders {
-    [UIView performWithoutAnimation:^{
-        NSMutableIndexSet *s = [NSMutableIndexSet indexSetWithIndex:DZSectionSpeed];
-        [s addIndex:DZSectionReverb];
-        [s addIndex:DZSectionSing];
-        [self.tableView reloadSections:s withRowAnimation:UITableViewRowAnimationNone];
-    }];
+    NSMutableIndexSet *s = [NSMutableIndexSet indexSetWithIndex:DZSectionSpeed];
+    [s addIndex:DZSectionReverb];
+    [s addIndex:DZSectionSing];
+    [self reload:s];
 }
 
 #pragma mark table data
@@ -143,55 +186,69 @@ typedef NS_ENUM(NSInteger, DZSection) {
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return DZSectionCount; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
         case DZSectionSing: return 1;
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
-        case DZSectionLockScreen: return self.pageTitle ? 0 : 1;   // not in the Playback Controls sheet
         case DZSectionReset: return 1;
+        case DZSectionModel: return DZVocalModelGetState() == DZVocalModelCompiling ? 1 : 2;
+        case DZSectionLockScreen: return 1;
     }
     return 0;
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
+    if (![self shows:section]) return nil;
     switch (section) {
         case DZSectionSing: return @"Sing";
         case DZSectionPresets: return @"Presets";
         case DZSectionSpeed: return @"Speed";
         case DZSectionReverb: return @"Reverb";
-        case DZSectionLockScreen: return self.pageTitle ? nil : @"Lock Screen";
+        case DZSectionModel: return @"Sing";
+        case DZSectionLockScreen: return @"Lock Screen";
     }
     return nil;
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
+    if (![self shows:section]) return nil;
     switch (section) {
         case DZSectionEffect:
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionSing:
-            return @"Turns down the voice in the centre of the mix; bass, drums and anything panned to the sides stay. "
-                   @"Works with or without Slowed + Reverb. Best on studio tracks with a centred lead vocal.";
+            return DZVocalModelGetState() == DZVocalModelReady
+                ? @"Takes the singing out with an on-device AI model. A change is heard after about 3 seconds."
+                : @"Needs the vocal model: open Deezit Settings (three-finger hold) → Sing → Download.";
         case DZSectionSpeed:
             return @"Pitch follows speed, like a turntable: slower is deeper.";
-        case DZSectionLockScreen:
-            return self.pageTitle ? nil
-                : @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.";
-        case DZSectionReset: {
-#ifndef DEEZIT_VERSION
-#define DEEZIT_VERSION "dev"
-#endif
+        case DZSectionReset:
             return @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
-        }
+        case DZSectionModel:
+            return @"Sing removes vocals with Spleeter (2-stems, by Deezer Research, MIT licence), running on the iPhone's "
+                   @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
+                   @"Turn it up or down with Playback Controls → Sing → Vocals.";
+        case DZSectionLockScreen:
+            return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
+                   @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
     }
     return nil;
+}
+
+- (UITableViewCell *)basicCell:(UITableView *)tv at:(NSIndexPath *)ip {
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
+    c.accessoryView = nil;
+    c.accessoryType = UITableViewCellAccessoryNone;
+    c.selectionStyle = UITableViewCellSelectionStyleNone;
+    return c;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     switch (ip.section) {
         case DZSectionEffect: {
-            UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
+            UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"Slowed + Reverb";
             cfg.image = [UIImage systemImageNamed:@"waveform"];
@@ -200,28 +257,37 @@ typedef NS_ENUM(NSInteger, DZSection) {
             sw.on = DZPrefBool(kDZEnabled);
             [sw addTarget:self action:@selector(toggleEnabled:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
-            c.selectionStyle = UITableViewCellSelectionStyleNone;
             return c;
         }
+        case DZSectionSing: {
+            if (DZVocalModelGetState() != DZVocalModelReady) {
+                UITableViewCell *c = [self basicCell:tv at:ip];
+                UIListContentConfiguration *cfg = [UIListContentConfiguration subtitleCellConfiguration];
+                cfg.text = @"Vocals";
+                cfg.secondaryText = @"Vocal model not downloaded";
+                cfg.secondaryTextProperties.color = UIColor.secondaryLabelColor;
+                cfg.image = [UIImage systemImageNamed:@"music.mic"];
+                c.contentConfiguration = cfg;
+                return c;
+            }
+            return [self sliderCell:tv at:ip title:@"Vocals" key:kDZVocals min:0 max:1
+                             format:^NSString *(float v) {
+                                 return v >= 0.995f ? @"100% (off)" : [NSString stringWithFormat:@"%d%%", (int)lroundf(v * 100)];
+                             }];
+        }
         case DZSectionPresets: {
-            UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
+            UITableViewCell *c = [self basicCell:tv at:ip];
             DZPreset *p = DZAllPresets()[ip.row];
             UIListContentConfiguration *cfg = [UIListContentConfiguration subtitleCellConfiguration];
             cfg.text = p.title;
             cfg.secondaryText = [NSString stringWithFormat:@"%.2f× · reverb %d%%", p.speed, (int)lroundf(p.reverbMix * 100)];
             cfg.secondaryTextProperties.color = UIColor.secondaryLabelColor;
             c.contentConfiguration = cfg;
-            c.accessoryView = nil;
             c.accessoryType = [DZPrefString(kDZPreset) isEqualToString:p.identifier]
                 ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
             c.selectionStyle = UITableViewCellSelectionStyleDefault;
             return c;
         }
-        case DZSectionSing:
-            return [self sliderCell:tv at:ip title:@"Vocals" key:kDZVocals min:0 max:1
-                             format:^NSString *(float v) {
-                                 return v >= 0.995f ? @"100% (off)" : [NSString stringWithFormat:@"%d%%", (int)lroundf(v * 100)];
-                             }];
         case DZSectionSpeed:
             return [self sliderCell:tv at:ip title:@"Speed" key:kDZSpeed
                                 min:kDZSpeedMin max:kDZSpeedMax
@@ -232,8 +298,51 @@ typedef NS_ENUM(NSInteger, DZSection) {
             NSArray *keys = @[kDZReverbMix, kDZReverbRoom, kDZReverbDamp];
             return [self sliderCell:tv at:ip title:titles[ip.row] key:keys[ip.row] min:0 max:1 format:pct];
         }
+        case DZSectionReset: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            cfg.text = @"Reset to defaults";
+            cfg.textProperties.color = UIColor.systemRedColor;
+            c.contentConfiguration = cfg;
+            c.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return c;
+        }
+        case DZSectionModel: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration valueCellConfiguration];
+            DZVocalModelState state = DZVocalModelGetState();
+            if (ip.row == 0) {
+                cfg.text = @"Vocal model";
+                cfg.secondaryText = DZVocalModelStatusText();
+                cfg.image = [UIImage systemImageNamed:@"music.mic"];
+            } else {
+                switch (state) {
+                    case DZVocalModelNotInstalled:
+                    case DZVocalModelFailed:
+                        cfg = [UIListContentConfiguration cellConfiguration];
+                        cfg.text = state == DZVocalModelFailed ? @"Try again" : @"Download";
+                        cfg.textProperties.color = c.tintColor;
+                        break;
+                    case DZVocalModelDownloading:
+                        cfg = [UIListContentConfiguration cellConfiguration];
+                        cfg.text = @"Cancel download";
+                        cfg.textProperties.color = c.tintColor;
+                        break;
+                    case DZVocalModelReady:
+                        cfg = [UIListContentConfiguration cellConfiguration];
+                        cfg.text = @"Delete model";
+                        cfg.textProperties.color = UIColor.systemRedColor;
+                        break;
+                    case DZVocalModelCompiling:
+                        break;
+                }
+                c.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            c.contentConfiguration = cfg;
+            return c;
+        }
         case DZSectionLockScreen: {
-            UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
+            UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"Animated album covers";
             cfg.image = [UIImage systemImageNamed:@"lock.rectangle.stack"];
@@ -242,19 +351,6 @@ typedef NS_ENUM(NSInteger, DZSection) {
             sw.on = DZPrefBool(kDZLockArtwork);
             [sw addTarget:self action:@selector(toggleLockArtwork:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
-            c.accessoryType = UITableViewCellAccessoryNone;
-            c.selectionStyle = UITableViewCellSelectionStyleNone;
-            return c;
-        }
-        case DZSectionReset: {
-            UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"basic" forIndexPath:ip];
-            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
-            cfg.text = @"Reset to defaults";
-            cfg.textProperties.color = UIColor.systemRedColor;
-            c.contentConfiguration = cfg;
-            c.accessoryView = nil;
-            c.accessoryType = UITableViewCellAccessoryNone;
-            c.selectionStyle = UITableViewCellSelectionStyleDefault;
             return c;
         }
     }
@@ -306,6 +402,16 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZPrefSetMany(@{ cell.prefKey: @(v), kDZPreset: @"custom" });
 }
 
+- (void)confirmDeleteModel {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Delete the vocal model?"
+                                                                message:@"Sing stops working until it's downloaded again."
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive
+                                         handler:^(UIAlertAction *a) { DZVocalModelDelete(); }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (ip.section == DZSectionPresets) {
@@ -314,6 +420,14 @@ typedef NS_ENUM(NSInteger, DZSection) {
     } else if (ip.section == DZSectionReset) {
         DZPrefsResetAudio();
         [self reloadSliders];
+    } else if (ip.section == DZSectionModel && ip.row == 1) {
+        switch (DZVocalModelGetState()) {
+            case DZVocalModelNotInstalled:
+            case DZVocalModelFailed: DZVocalModelDownload(); break;
+            case DZVocalModelDownloading: DZVocalModelCancel(); break;
+            case DZVocalModelReady: [self confirmDeleteModel]; break;
+            case DZVocalModelCompiling: break;
+        }
     }
 }
 

@@ -24,7 +24,7 @@ generator (plain ObjC runtime).
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
 | Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
 | ••• menu row | **working**: "Playback Controls" as the first option of the full-screen player's ••• menu |
-| Sing (vocal reduction) | DSP version: "Vocals" slider, mid/side removal of the centre voice band (new, not yet tested on a device); an ML separator is planned |
+| Sing (AI vocal removal) | Spleeter 2-stems on Core ML, downloaded from Settings; processed as Deezer schedules audio (new, not yet tested on a device) |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -36,14 +36,15 @@ Deezer's audio completely alone.
 
 ## Opening the controls
 
-**Full-screen player → ••• → Playback Controls** opens the slowed + reverb
-controls as a half-height sheet over the player.
+**Full-screen player → ••• → Playback Controls** opens the sound controls
+(Slowed + Reverb, Sing vocals, presets, speed, reverb) as a half-height sheet
+over the player.
 
 Gestures, anywhere in Deezer:
 
 | Gesture | Opens |
 |---|---|
-| **Three-finger hold** | Deezit settings (same page, full height) |
+| **Three-finger hold** | Deezit Settings: Sing model download, lock-screen covers |
 | **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
 
 The first launch of each Deezit version shows a short banner to confirm the
@@ -71,25 +72,30 @@ cyan -i Deezer.ipa -o Deezer-Deezit.ipa -f .theos/obj/Deezit.dylib
 
 Then sideload `Deezer-Deezit.ipa` as usual.
 
-## Sing (vocal reduction)
+## Sing (AI vocal removal)
 
-Playback Controls → **Sing → Vocals** turns the lead voice down (100% =
-untouched). It's Deezit's own audio unit (`DZVocalUnit.m` + `DZVocals.c`),
-first in the chain after Deezer's mixer, so the slider acts instantly and
-works with or without Slowed + Reverb:
+1. **Settings** (three-finger hold) → **Sing → Download** fetches the vocal
+   model once (about 40 MB, from this repo's `vocal-model-v1` release) and
+   prepares it for the phone's Neural Engine.
+2. **Playback Controls → Sing → Vocals** sets how much singing is left
+   (100% = untouched). A change is heard after about 3 seconds.
 
-- the mix is split into mid (L+R) and side (L-R)
-- the voice band of the mid, about 120 Hz - 8 kHz, is removed by the slider
-  amount; bass, kick, cymbals and everything panned off-centre stay
+The model is **Spleeter 2-stems** (Deezer Research, MIT licence), converted
+by `tools/vocal_model/convert.py` in `.github/workflows/vocal-model.yml`: the
+TensorFlow weights are loaded into a PyTorch copy of Spleeter's U-Nets,
+checked layer by layer against a Keras build, and turned into one fp16
+Core ML file. Audio never leaves the phone.
 
-It's a plain DSP trick, so it works best on studio tracks with a centred,
-dry lead vocal; centred instruments in the same range (snare, some synths)
-drop too. A machine-learning separator is the planned upgrade: Deezer queues
-3 s of decoded audio ahead of playback (see `DZBufferProbe.x`), enough to
-separate each chunk before it plays without delaying anything.
-
-If the engine won't start with the unit, Deezit removes just that unit and
-retries, so slowed + reverb keep working.
+How it plays (`DZSeparator.m`, `DZSing.x`): Deezer schedules 83 ms buffers and
+keeps 3 s queued (`DZBufferProbe.x`). With Sing on, Deezit holds ~0.8 s of
+them, runs a streaming STFT (4096 / 1024), asks the model for the vocal mask
+every 32 frames (with 96 frames of context), scales each bin by
+`1 - (1 - vocals) * mask` (bins above ~11 kHz keep the mix), inverse-STFTs with
+overlap-add, writes the result back into Deezer's buffers and schedules them
+in order. Nothing is delayed, so the position and lyrics stay in sync.
+Buffers pass through untouched until the player is well fed; if its queue
+ever runs low, Deezit lets everything through unprocessed for the rest of
+that track. The debug panel's `sing:` line shows what it is doing.
 
 ## Animated lock-screen covers
 
@@ -129,9 +135,11 @@ DZPrefs.*                   NSUserDefaults suite + atomic mirror for the audio t
 DZAudioParams.h             plain-C params struct shared with the DSP
 DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / Nightcore
 DZDSP.*                     engine-agnostic DSP core (C)
-DZVocals.* / DZVocalUnit.*  "Sing": mid/side vocal reduction (C) as an in-process AUAudioUnit
-DZAudioHook.x               AVAudioEngine backend: splices vocals + varispeed + reverb before the output node
-DZBufferProbe.x             logs how Deezer schedules audio (sizing the future ML separator)
+DZAudioHook.x               AVAudioEngine backend: splices varispeed + reverb before the output node
+DZSing.x / DZSeparator.*    "Sing": AI vocal removal on Deezer's buffers as they are scheduled
+DZVocalModel.*              vocal model download / compile / load
+tools/vocal_model/          Spleeter 2-stems -> Core ML converter (run by vocal-model.yml)
+DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
 DZLockArtwork.x             animated lock-screen cover (now-playing hook)
@@ -145,6 +153,10 @@ docs/ANALYSIS.md            findings + hook decision table
 ```
 
 ## Credits
+
+Sing uses [Spleeter](https://github.com/deezer/spleeter)'s pretrained
+2-stems model by Deezer Research (MIT licence), converted to Core ML; the
+PyTorch port in `tools/vocal_model/convert.py` was written for Deezit.
 
 The Apple Music lookup (iTunes Search matching, web-player token, catalog
 `editorialVideo`) is adapted from

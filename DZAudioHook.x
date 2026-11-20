@@ -32,7 +32,6 @@
 #import "DZAudioHook.h"
 #import "DZPrefs.h"
 #import "DZLog.h"
-#import "DZVocalUnit.h"
 
 // Apple Reverb2 ('rvb2'), the unit AVAudioUnitReverb wraps. Used directly so
 // room size and damping map onto real parameters (AVAudioUnitReverb only
@@ -51,7 +50,6 @@ enum {
 
 @interface DZEngineState : NSObject
 @property (nonatomic) NSUInteger serial;          // "engine #n" in logs
-@property (nonatomic, strong) AVAudioUnitEffect *vocals;    // Deezit's "Sing" unit, nil if it couldn't be made
 @property (nonatomic, strong) AVAudioUnitVarispeed *varispeed;
 @property (nonatomic, strong) AVAudioUnitEffect *reverb;
 @property (nonatomic) BOOL loggedNoSource;
@@ -115,7 +113,6 @@ static DZEngineState *stateFor(AVAudioEngine *e) {
         if (st) return st;
         st = [DZEngineState new];
         st.serial = ++sEnginesSeen;
-        st.vocals = DZVocalUnitCreate();
         st.varispeed = [AVAudioUnitVarispeed new];
         AudioComponentDescription d = { kAudioUnitType_Effect, kDZReverb2SubType, kAudioUnitManufacturer_Apple, 0, 0 };
         st.reverb = [[AVAudioUnitEffect alloc] initWithAudioComponentDescription:d];
@@ -129,13 +126,7 @@ static DZEngineState *stateFor(AVAudioEngine *e) {
 
 #pragma mark - graph description (for the debug log)
 
-// First Deezit node after Deezer's mixer: the vocals unit when there is one.
-static AVAudioNode *chainHead(DZEngineState *st) {
-    return st.vocals ?: (AVAudioNode *)st.varispeed;
-}
-
 static NSString *nodeName(DZEngineState *st, AVAudioNode *n) {
-    if (n && n == st.vocals) return @"[Deezit vocals]";
     if (n == st.varispeed) return @"[Deezit varispeed]";
     if (n == st.reverb) return @"[Deezit reverb]";
     NSString *name = NSStringFromClass([n class]);
@@ -180,7 +171,7 @@ static NSString *describeGraph(AVAudioEngine *e, DZEngineState *st) {
 
 #pragma mark - splice
 
-// Rewires  src --(bus)--> out  into  src -> [vocals] -> varispeed -> reverb -> out.
+// Rewires  src --(bus)--> out  into  src -> varispeed -> reverb -> out.
 // Returns YES when the output is connected afterwards (spliced, or Deezer's
 // connection restored after a failure); NO tells the caller to run Deezer's
 // original call instead.
@@ -199,11 +190,9 @@ static BOOL splice(AVAudioEngine *e, DZEngineState *st, AVAudioNode *src, AVAudi
     BOOL ok = NO;
     sInside++;
     @try {
-        if (st.vocals && st.vocals.engine != e) [e attachNode:st.vocals];
         if (st.varispeed.engine != e) [e attachNode:st.varispeed];
         if (st.reverb.engine != e) [e attachNode:st.reverb];
-        [e connect:src to:chainHead(st) fromBus:bus toBus:0 format:fmt];
-        if (st.vocals) [e connect:st.vocals to:st.varispeed format:fmt];
+        [e connect:src to:st.varispeed fromBus:bus toBus:0 format:fmt];
         [e connect:st.varispeed to:st.reverb format:fmt];
         [e connect:st.reverb to:out format:fmt];
         ok = YES;
@@ -234,42 +223,17 @@ static BOOL splice(AVAudioEngine *e, DZEngineState *st, AVAudioNode *src, AVAudi
 // Undo a splice: Deezer's node goes straight back to the output and Deezit's
 // units are detached. Used when the engine won't start with them in place.
 static BOOL unsplice(AVAudioEngine *e, DZEngineState *st) {
-    AVAudioConnectionPoint *src = [e inputConnectionPointForNode:chainHead(st) inputBus:0];
+    AVAudioConnectionPoint *src = [e inputConnectionPointForNode:st.varispeed inputBus:0];
     if (!src.node) return NO;
     BOOL ok = NO;
     sInside++;
     @try {
         [e connect:src.node to:e.outputNode fromBus:src.bus toBus:0 format:nil];
-        if (st.vocals.engine == e) [e detachNode:st.vocals];
         [e detachNode:st.varispeed];
         [e detachNode:st.reverb];
         ok = YES;
     } @catch (NSException *ex) {
         noteError([NSString stringWithFormat:@"engine #%lu: undoing the splice failed: %@",
-                   (unsigned long)st.serial, ex.reason]);
-    }
-    sInside--;
-    return ok;
-}
-
-// Takes only the vocals unit out (Deezer's mixer -> varispeed directly), for
-// when the engine won't start with it; slowed + reverb keep working. The
-// unit isn't used on this engine again.
-static BOOL dropVocals(AVAudioEngine *e, DZEngineState *st) {
-    AVAudioUnitEffect *vocals = st.vocals;
-    if (!vocals || vocals.engine != e) return NO;
-    AVAudioConnectionPoint *src = [e inputConnectionPointForNode:vocals inputBus:0];
-    if (!src.node) return NO;
-    BOOL ok = NO;
-    sInside++;
-    @try {
-        AVAudioFormat *fmt = [vocals inputFormatForBus:0];
-        [e connect:src.node to:st.varispeed fromBus:src.bus toBus:0 format:fmt];
-        [e detachNode:vocals];
-        st.vocals = nil;
-        ok = YES;
-    } @catch (NSException *ex) {
-        noteError([NSString stringWithFormat:@"engine #%lu: removing the vocals unit failed: %@",
                    (unsigned long)st.serial, ex.reason]);
     }
     sInside--;
@@ -317,7 +281,7 @@ static void logGraphIfChanged(AVAudioEngine *e, NSString *when) {
         return;
     }
     DZEngineState *st = stateFor(self);
-    if (st.gaveUp || node1 == st.reverb || node1 == st.varispeed || (st.vocals && node1 == st.vocals)) {
+    if (st.gaveUp || node1 == st.reverb || node1 == st.varispeed) {
         %orig;
         return;
     }
@@ -338,14 +302,9 @@ static void logGraphIfChanged(AVAudioEngine *e, NSString *when) {
         NSError *err = outError ? *outError : nil;
         noteError([NSString stringWithFormat:@"engine #%lu: start failed: %@ (%ld)", (unsigned long)st.serial,
                    err.localizedDescription ?: @"no error", (long)err.code]);
-        // the newest unit first: without vocals, slowed + reverb may still work
-        if (dropVocals(self, st)) {
-            ok = %orig;
-            DZLog("audio: engine #%lu: removed the vocals unit, retried start: %@", (unsigned long)st.serial,
-                  ok ? @"OK (Sing unavailable this session)" : @"still failing");
-        }
-        // then all of Deezit's units, so a bad splice costs the effect, never the music
-        if (!ok && !st.gaveUp && st.reverb.engine == self) {
+        // if Deezit's units are in this graph, take them out and try once more,
+        // so a bad splice costs the effect, never the music
+        if (!st.gaveUp && st.reverb.engine == self) {
             st.gaveUp = YES;
             if (unsplice(self, st)) {
                 ok = %orig;

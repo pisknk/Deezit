@@ -1,0 +1,66 @@
+name: Build vocal model
+
+# Converts Spleeter 2-stems (Deezer Research, MIT) into the Core ML model
+# Deezit's "Sing" downloads (Settings -> Sing -> Download), and publishes it
+# on the `vocal-model-v1` release of this repository. Runs when the converter
+# changes, or by hand from the Actions tab.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/vocal_model/**'
+      - '.github/workflows/vocal-model.yml'
+
+permissions:
+  contents: write   # create / update the release
+
+jobs:
+  model:
+    runs-on: macos-14   # Apple silicon: Core ML can run the model to check it
+
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v5
+
+      - name: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # tensorflow only reads Spleeter's checkpoint and runs the parity test
+          pip install "numpy==1.26.4" "torch==2.4.1" "coremltools==8.1" "tensorflow==2.16.2"
+
+      - name: Spleeter 2-stems weights
+        run: |
+          curl -fsSL -o 2stems.tar.gz https://github.com/deezer/spleeter/releases/download/v1.4.0/2stems.tar.gz
+          mkdir -p 2stems
+          tar -xzf 2stems.tar.gz -C 2stems
+          ls -la 2stems
+
+      - name: convert
+        run: python tools/vocal_model/convert.py --checkpoint 2stems --out DeezitVocals.mlmodel
+
+      - name: publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=vocal-model-v1
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "${{ github.sha }}" --title "Deezit vocal model" \
+              --notes "Spleeter 2-stems (Deezer Research, MIT licence) converted to Core ML for Deezit's Sing feature. Downloaded by the tweak from Settings -> Sing -> Download."
+          fi
+          gh release upload "$TAG" DeezitVocals.mlmodel DeezitVocals.mlmodel.sha256 DeezitVocals.mlmodel.json --clobber
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeezitVocals
+          path: |
+            DeezitVocals.mlmodel
+            DeezitVocals.mlmodel.sha256
+            DeezitVocals.mlmodel.json
+          retention-days: 30
