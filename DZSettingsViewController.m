@@ -9,14 +9,16 @@
 #define DEEZIT_VERSION "dev"
 #endif
 
-// One controller, two pages:
-//   Playback Controls (player ••• menu): everything that shapes the sound -
-//     Slowed + Reverb switch, Sing (vocals), presets, speed, reverb, reset
+// One controller, three pages:
+//   Playback Controls (player ••• menu): Slowed + Reverb switch, presets,
+//     speed, reverb, reset
+//   Karaoke Mode (player ••• menu, under Playback Controls): Sing - vocals,
+//     backing vocals, strength, model
 //   Settings (three-finger hold): app-level things - the Sing model download
 //     and the lock-screen covers
 typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionEffect,      // controls
-    DZSectionSing,        // controls: Vocals slider
+    DZSectionSing,        // karaoke: Vocals, Backing vocals, Strength, Model
     DZSectionPresets,     // controls
     DZSectionSpeed,       // controls
     DZSectionReverb,      // controls
@@ -82,8 +84,11 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 #pragma mark - controller
 
+typedef NS_ENUM(NSInteger, DZPage) { DZPageSettings, DZPageControls, DZPageKaraoke };
+
 @interface DZSettingsViewController ()
 @property (nonatomic, copy) NSString *pageTitle;
+@property (nonatomic) DZPage page;
 @end
 
 @implementation DZSettingsViewController
@@ -96,8 +101,17 @@ typedef NS_ENUM(NSInteger, DZSection) {
 }
 
 + (UIViewController *)playbackControlsController {
+    return [self sheetWithPage:DZPageControls title:@"Playback Controls"];
+}
+
++ (UIViewController *)karaokeController {
+    return [self sheetWithPage:DZPageKaraoke title:@"Karaoke Mode"];
+}
+
++ (UIViewController *)sheetWithPage:(DZPage)page title:(NSString *)title {
     DZSettingsViewController *vc = [[DZSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-    vc.pageTitle = @"Playback Controls";
+    vc.page = page;
+    vc.pageTitle = title;
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
     UISheetPresentationController *sheet = nav.sheetPresentationController;
@@ -109,7 +123,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
 }
 
 - (BOOL)isControls {
-    return self.pageTitle != nil;
+    return self.page == DZPageControls;
 }
 
 // Sing works with either model: Spleeter (Settings -> Sing) or MDX-Net (model lab).
@@ -126,8 +140,9 @@ static NSInteger singModelInUse(void) {
 
 - (BOOL)shows:(NSInteger)section {
     switch (section) {
-        case DZSectionEffect:
         case DZSectionSing:
+            return self.page == DZPageKaraoke;
+        case DZSectionEffect:
         case DZSectionPresets:
         case DZSectionSpeed:
         case DZSectionReverb:
@@ -136,7 +151,7 @@ static NSInteger singModelInUse(void) {
         case DZSectionModel:
         case DZSectionDemucs:
         case DZSectionLockScreen:
-            return ![self isControls];
+            return self.page == DZPageSettings;
     }
     return NO;
 }
@@ -267,10 +282,10 @@ static NSInteger singModelInUse(void) {
         case DZSectionModel:
             return @"Sing removes vocals with Spleeter (2-stems, by Deezer Research, MIT licence), running on the iPhone's "
                    @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
-                   @"Turn it up or down with Playback Controls → Sing → Vocals.";
+                   @"Turn it up or down with ••• → Karaoke Mode → Vocals.";
         case DZSectionDemucs:
             return @"MDX-Net: UVR's MDX-Net 9482 vocal model (by Anjok07, MIT licence; about 14 MB), converted to Core ML and "
-                   @"checked against the original in Deezit's CI. Once downloaded, pick it in Playback Controls → Sing → Model. "
+                   @"checked against the original in Deezit's CI. Once downloaded, pick it in ••• → Karaoke Mode → Model. "
                    @"The benchmark times it on this iPhone and shows how much runs on the Neural Engine, which Sing needs to keep "
                    @"working with the screen locked. Takes about a minute. "
                    @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";

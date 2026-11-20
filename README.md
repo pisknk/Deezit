@@ -23,8 +23,8 @@ generator (plain ObjC runtime).
 | Prefs → realtime-safe audio params | done |
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
 | Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
-| ••• menu row | **working**: "Playback Controls" as the first option of the full-screen player's ••• menu |
-| Sing (AI vocal removal) | **working** with Spleeter 2-stems; UVR MDX-Net 9482 as a second model (Neural Engine, 49 ms per 5.9 s on an iPhone 13; new, not yet heard on a device) |
+| ••• menu row | **working**: "Playback Controls" and "Karaoke Mode" as the first options of the full-screen player's ••• menu |
+| Sing (AI vocal removal) | **working**, in ••• → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -37,7 +37,9 @@ Deezer's audio completely alone.
 ## Opening the controls
 
 **Full-screen player → ••• → Playback Controls** opens the sound controls
-(Slowed + Reverb, Sing vocals, presets, speed, reverb) as a half-height sheet
+(Slowed + Reverb, presets, speed, reverb) as a half-height sheet; **••• → Karaoke
+Mode**, the row under it, opens Sing (vocals, backing vocals, strength, model)
+the same way. Both sheets open
 over the player.
 
 Gestures, anywhere in Deezer:
@@ -77,7 +79,7 @@ Then sideload `Deezer-Deezit.ipa` as usual.
 1. **Settings** (three-finger hold) → **Sing → Download** fetches the vocal
    model once (about 40 MB, from this repo's `vocal-model-v1` release) and
    prepares it for the phone's Neural Engine.
-2. **Playback Controls → Sing → Vocals** sets how much singing is left
+2. **••• → Karaoke Mode → Vocals** sets how much singing is left
    (100% = untouched); **Backing vocals** keeps the harmonies that are
    spread left / right and removes only the centred lead; **Strength**
    (Gentle / Normal / Strong) sets how sure the model must be before a sound
@@ -85,7 +87,7 @@ Then sideload `Deezer-Deezit.ipa` as usual.
    half-mistakes for singing (violins, claps, synth leads) alone. Changes
    are heard after about 3 seconds.
 3. Optional: **Settings → Model lab → MDX-Net → Download** (about 14 MB), then
-   **Playback Controls → Sing → Model → MDX-Net**. UVR's MDX-Net 9482 sees the
+   **••• → Karaoke Mode → Model → MDX-Net**. UVR's MDX-Net 9482 sees the
    whole spectrum (to ~22 kHz) and estimates the vocals themselves, so more of
    the instruments and the highs survive. Switching models restarts Sing for a
    moment, like the start of a track.
