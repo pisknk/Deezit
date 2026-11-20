@@ -189,7 +189,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
-        case DZSectionSing: return 1;
+        case DZSectionSing: return DZVocalModelGetState() == DZVocalModelReady ? 2 : 1;   // Vocals, Backing vocals
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
@@ -220,7 +220,9 @@ typedef NS_ENUM(NSInteger, DZSection) {
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionSing:
             return DZVocalModelGetState() == DZVocalModelReady
-                ? @"Takes the singing out with an on-device AI model. A change is heard after about 3 seconds."
+                ? @"Takes the singing out with an on-device AI model. Backing vocals keeps the harmonies spread left and right "
+                  @"and removes only the centred lead (a lead that is itself wide or reverb-heavy may leave a trace). "
+                  @"Changes are heard after about 3 seconds."
                 : @"Needs the vocal model: open Deezit Settings (three-finger hold) → Sing → Download.";
         case DZSectionSpeed:
             return @"Pitch follows speed, like a turntable: slower is deeper.";
@@ -269,6 +271,12 @@ typedef NS_ENUM(NSInteger, DZSection) {
                 cfg.image = [UIImage systemImageNamed:@"music.mic"];
                 c.contentConfiguration = cfg;
                 return c;
+            }
+            if (ip.row == 1) {
+                return [self sliderCell:tv at:ip title:@"Backing vocals" key:kDZBackingVocals min:0 max:1
+                                 format:^NSString *(float v) {
+                                     return v <= 0.005f ? @"removed" : [NSString stringWithFormat:@"%d%% kept", (int)lroundf(v * 100)];
+                                 }];
             }
             return [self sliderCell:tv at:ip title:@"Vocals" key:kDZVocals min:0 max:1
                              format:^NSString *(float v) {
@@ -396,6 +404,15 @@ typedef NS_ENUM(NSInteger, DZSection) {
         if (v > 0.98f) { v = 1.0f; slider.value = v; }
         [cell refreshValueLabel];
         DZPrefSet(kDZVocals, @(v));
+        return;
+    }
+    if ([cell.prefKey isEqualToString:kDZBackingVocals]) {
+        // snap to the ends; not part of the presets either
+        if (v < 0.02f) v = 0;
+        if (v > 0.98f) v = 1;
+        slider.value = v;
+        [cell refreshValueLabel];
+        DZPrefSet(kDZBackingVocals, @(v));
         return;
     }
     [cell refreshValueLabel];

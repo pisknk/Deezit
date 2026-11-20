@@ -14,6 +14,7 @@ NSString *const kDZPreset = @"preset";
 NSString *const kDZAudioHook = @"audioHook";
 NSString *const kDZLockArtwork = @"lockArtwork";
 NSString *const kDZVocals = @"vocals";
+NSString *const kDZBackingVocals = @"backingVocals";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -27,6 +28,7 @@ static _Atomic float sReverbMix;
 static _Atomic float sReverbRoom;
 static _Atomic float sReverbDamp;
 static _Atomic float sVocalCut;
+static _Atomic float sBackingKeep;
 
 static NSDictionary *defaultValues(void) {
     return @{
@@ -39,6 +41,7 @@ static NSDictionary *defaultValues(void) {
         kDZAudioHook: @YES,
         kDZLockArtwork: @YES,
         kDZVocals: @1.0f,
+        kDZBackingVocals: @0.0f,
     };
 }
 
@@ -51,6 +54,7 @@ static void refreshAtomics(void) {
     atomic_store(&sReverbRoom, clampf([sDefaults floatForKey:kDZReverbRoom], 0, 1));
     atomic_store(&sReverbDamp, clampf([sDefaults floatForKey:kDZReverbDamp], 0, 1));
     atomic_store(&sVocalCut, 1.0f - clampf([sDefaults floatForKey:kDZVocals], 0, 1));
+    atomic_store(&sBackingKeep, clampf([sDefaults floatForKey:kDZBackingVocals], 0, 1));
 }
 
 static void postChanged(void) {
@@ -96,7 +100,7 @@ void DZPrefSetMany(NSDictionary<NSString *, id> *values) {
 
 void DZPrefsResetAudio(void) {
     DZPrefsBootstrap();
-    for (NSString *k in @[kDZSpeed, kDZReverbMix, kDZReverbRoom, kDZReverbDamp, kDZPreset, kDZVocals]) {
+    for (NSString *k in @[kDZSpeed, kDZReverbMix, kDZReverbRoom, kDZReverbDamp, kDZPreset, kDZVocals, kDZBackingVocals]) {
         [sDefaults removeObjectForKey:k];
     }
     postChanged();
@@ -110,6 +114,7 @@ DZAudioParams DZPrefsAudioParams(void) {
     p.reverbRoom = atomic_load_explicit(&sReverbRoom, memory_order_relaxed);
     p.reverbDamp = atomic_load_explicit(&sReverbDamp, memory_order_relaxed);
     p.vocalCut = atomic_load_explicit(&sVocalCut, memory_order_relaxed);
+    p.backingKeep = atomic_load_explicit(&sBackingKeep, memory_order_relaxed);
     if (p.speed <= 0) p.speed = 1.0f; // never bootstrapped yet
     return p;
 }

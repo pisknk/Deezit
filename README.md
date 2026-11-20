@@ -78,7 +78,9 @@ Then sideload `Deezer-Deezit.ipa` as usual.
    model once (about 40 MB, from this repo's `vocal-model-v1` release) and
    prepares it for the phone's Neural Engine.
 2. **Playback Controls → Sing → Vocals** sets how much singing is left
-   (100% = untouched). A change is heard after about 3 seconds.
+   (100% = untouched); **Backing vocals** keeps the harmonies that are
+   spread left / right and removes only the centred lead. Changes are heard
+   after about 3 seconds.
 
 The model is **Spleeter 2-stems** (Deezer Research, MIT licence), converted
 by `tools/vocal_model/convert.py` in `.github/workflows/vocal-model.yml`: the
@@ -88,11 +90,15 @@ Core ML file. Audio never leaves the phone.
 
 How it plays (`DZSeparator.m`, `DZSing.x`): Deezer schedules 83 ms buffers and
 keeps 3 s queued (`DZBufferProbe.x`). With Sing on, Deezit holds ~0.8 s of
-them, runs a streaming STFT (4096 / 1024), asks the model for the vocal mask
-every 32 frames (with 96 frames of context), scales each bin by
-`1 - (1 - vocals) * mask` (bins above ~11 kHz keep the mix), inverse-STFTs with
-overlap-add, writes the result back into Deezer's buffers and schedules them
-in order. Nothing is delayed, so the position and lyrics stay in sync.
+them, runs a streaming STFT (4096 / 1024) and asks the model for the vocal
+mask every 32 frames, seeing 80 frames of the past and 16 of the future
+(~0.37 s look-ahead, still inside Deezer's queue). Above the model's ~11 kHz
+range the mask is its mean over ~8.3-11 kHz, so sibilants go with the voice.
+The vocal part (mask * mix) is split into centre (lead) and sides (backing):
+the lead is removed by the Vocals amount, the sides by that times
+(1 - Backing vocals). The result is inverse-STFT'd with overlap-add, written
+back into Deezer's buffers and scheduled in order. Core ML runs it on the
+Neural Engine + CPU only (no GPU, which iOS blocks in the background). Nothing is delayed, so the position and lyrics stay in sync.
 Buffers pass through untouched until the player is well fed; if its queue
 ever runs low, Deezit lets everything through unprocessed for the rest of
 that track. The debug panel's `sing:` line shows what it is doing.

@@ -62,7 +62,10 @@ static NSString *checkContract(MLModel *model) {
 
 static MLModel *loadCompiled(NSString **error) {
     MLModelConfiguration *cfg = [MLModelConfiguration new];
-    cfg.computeUnits = MLComputeUnitsAll;   // Neural Engine when it can
+    // Neural Engine + CPU, never the GPU: iOS doesn't allow GPU work while the
+    // app is in the background, and Deezer plays mostly with the screen locked
+    if (@available(iOS 16.0, *)) cfg.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+    else cfg.computeUnits = MLComputeUnitsAll;
     NSError *err = nil;
     MLModel *model = [MLModel modelWithContentsOfURL:compiledURL() configuration:cfg error:&err];
     if (!model) { if (error) *error = err.localizedDescription ?: @"couldn't load"; return nil; }

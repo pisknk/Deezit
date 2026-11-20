@@ -18,6 +18,10 @@ enum {
     kBins = 1024,              // bins the model sees (0 ... ~11 kHz)
     kT = 128,                  // model window (frames)
     kB = 32,                   // new frames per model run (~0.74 s)
+    kL = 16,                   // look-ahead frames the model also sees (~0.37 s)
+    kCtx = kT - kB - kL,       // past frames in the window (80)
+    kSpan = (kB + kL - 1) * kH + kN,   // input samples one block needs
+    kHiFrom = 768,             // mask above the model's range = its mean over 768..1023 (~8.3-11 kHz)
     kRing = 1 << 18,           // ~5.9 s per ring
     kRingMask = kRing - 1,
     kFade = 4096,              // raw -> processed crossfade when holding starts
@@ -97,7 +101,7 @@ static BOOL setupFFT(void) {
     int64_t fadeStart;
     BOOL holding, computing, degraded;
     int pending;                  // schedule ops queued on schedQ
-    float lastCut;
+    float lastCut, lastBacking;
     _Atomic(int64_t) playerFrames;   // given to the player, completion not yet run
     float *inRing[2], *outRing[2];
     float *scratch[2];            // input span of one block
@@ -137,7 +141,7 @@ static DZSepNode *makeNode(AVAudioPlayerNode *node) {
     for (int c = 0; c < 2; c++) {
         s->inRing[c] = calloc(kRing, sizeof(float));
         s->outRing[c] = calloc(kRing, sizeof(float));
-        s->scratch[c] = calloc((kB - 1) * kH + kN, sizeof(float));
+        s->scratch[c] = calloc(kSpan, sizeof(float));
     }
     s->specRe = calloc(2 * kB * kHalf, sizeof(float));
     s->specIm = calloc(2 * kB * kHalf, sizeof(float));
@@ -165,6 +169,7 @@ static void resetSession(DZSepNode *s) {
     s->holding = NO;
     s->computing = NO;
     s->lastCut = 0;
+    s->lastBacking = 0;
     s->clearPending = YES;
 }
 
@@ -224,14 +229,25 @@ static void runCompute(DZSepNode *s, uint64_t gen);
 // Starts a compute pass when a block's worth of input is in. Lock held.
 static void kickCompute(DZSepNode *s) {
     if (s->computing) return;
-    if (s->inCount < (s->nextFrame + kB - 1) * kH + kN) return;
+    if (s->inCount < s->nextFrame * kH + kSpan) return;      // the block plus its look-ahead
     s->computing = YES;
     uint64_t gen = s->gen;
     dispatch_async(s.computeQ, ^{ runCompute(s, gen); });
 }
 
+// Removes vocals from one stereo bin pair, in place. vL/vR = the vocal part
+// (mask * mix); its centre (vL+vR)/2 is the lead, its sides (vL-vR)/2 the
+// side-panned backing vocals. cutLead removes the centre, cutSide the sides
+// (cutSide = cutLead when backing vocals aren't kept, so it's mask removal).
+static inline void unmix(float *l, float *r, float mL, float mR, float cutLead, float cutSide) {
+    float vL = mL * *l, vR = mR * *r;
+    float mid = 0.5f * (vL + vR), side = 0.5f * (vL - vR);
+    *l -= cutLead * mid + cutSide * side;
+    *r -= cutLead * mid - cutSide * side;
+}
+
 static void runCompute(DZSepNode *s, uint64_t gen) {
-    const int span = (kB - 1) * kH + kN;
+    const int span = kSpan;
     for (;;) {
         os_unfair_lock_lock(&s->lock);
         if (s->gen != gen) { os_unfair_lock_unlock(&s->lock); return; }
@@ -249,10 +265,11 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
         for (int c = 0; c < 2; c++) {
             for (int i = 0; i < span; i++) s->scratch[c][i] = s->inRing[c][(from + i) & kRingMask];
         }
-        float cutPrev = s->lastCut;
+        float cutPrev = s->lastCut, backPrev = s->lastBacking;
         os_unfair_lock_unlock(&s->lock);
 
-        float cut = DZPrefsAudioParams().vocalCut;
+        DZAudioParams params = DZPrefsAudioParams();
+        float cut = params.vocalCut, backing = params.backingKeep;
         MLModel *model = DZVocalModelGet();
         if (!model) {
             os_unfair_lock_lock(&s->lock);
@@ -262,17 +279,26 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
             return;
         }
 
-        // STFT of the block; magnitudes shift into the model window (96 old + 32 new frames)
+        // Model window = frames [f0 - 80, f0 + 48): 80 past, the 32 new ones,
+        // 16 look-ahead. Slide it by 32 and (re)compute frames f0 ... f0+47;
+        // the complex spectra are kept for the 32 new ones only.
         float *mag = (float *)s.input.dataPointer;
         for (int c = 0; c < 2; c++) {
             float *m = mag + c * kT * kBins;
             memmove(m, m + kB * kBins, sizeof(float) * (kT - kB) * kBins);
-            for (int j = 0; j < kB; j++) {
+            for (int j = 0; j < kB + kL; j++) {
                 float *frame = s->tmp[2];
                 vDSP_vmul(s->scratch[c] + j * kH, 1, sWindow, 1, frame, 1, kN);
-                float *re = s->specRe + (c * kB + j) * kHalf, *im = s->specIm + (c * kB + j) * kHalf;
+                float *re, *im;
+                if (j < kB) {
+                    re = s->specRe + (c * kB + j) * kHalf;
+                    im = s->specIm + (c * kB + j) * kHalf;
+                } else {
+                    re = s->tmp[3];
+                    im = s->tmp[3] + kHalf;
+                }
                 rfft(frame, re, im, s->tmp[0], s->tmp[1]);
-                float *row = m + (kT - kB + j) * kBins;
+                float *row = m + (kCtx + j) * kBins;
                 row[0] = fabsf(re[0]) / sFwdScale;                        // DC (im[0] holds Nyquist)
                 for (int k = 1; k < kBins; k++) row[k] = hypotf(re[k], im[k]) / sFwdScale;
             }
@@ -295,7 +321,7 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
         DZMaskView view = { masks.dataPointer, masks.dataType,
                             masks.strides[1].longValue, masks.strides[2].longValue, masks.strides[3].longValue };
 
-        // apply 1 - cut * mask to bins 0..1023 (higher bins keep the mix), inverse STFT
+        // remove the vocals bin by bin, inverse STFT, overlap-add
         float *frameOut = s->tmp[3];
         float synth = 1.0f / (sRoundTrip * kOlaNorm);
         os_unfair_lock_lock(&s->lock);
@@ -303,17 +329,33 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
         os_unfair_lock_unlock(&s->lock);
         // (the OLA below only touches the out ring, which only this queue writes)
         for (int j = 0; j < kB; j++) {
-            float cj = cutPrev + (cut - cutPrev) * (float)(j + 1) / kB;
+            float step = (float)(j + 1) / kB;                     // glide setting changes over the block
+            float cutLead = cutPrev + (cut - cutPrev) * step;
+            float keep = backPrev + (backing - backPrev) * step;
+            float cutSide = cutLead * (1.0f - keep);
+            int t = kCtx + j;
+            float *reL = s->specRe + j * kHalf, *imL = s->specIm + j * kHalf;
+            float *reR = s->specRe + (kB + j) * kHalf, *imR = s->specIm + (kB + j) * kHalf;
+
+            // above the model's range (~11 kHz up): its mean mask over ~8.3-11 kHz,
+            // so the singer's "s" / "t" go with the voice
+            float hiL = 0, hiR = 0;
+            for (int k = kHiFrom; k < kBins; k++) { hiL += maskAt(&view, 0, t, k); hiR += maskAt(&view, 1, t, k); }
+            hiL /= (kBins - kHiFrom);
+            hiR /= (kBins - kHiFrom);
+
+            unmix(&reL[0], &reR[0], maskAt(&view, 0, t, 0), maskAt(&view, 1, t, 0), cutLead, cutSide);   // DC
+            unmix(&imL[0], &imR[0], hiL, hiR, cutLead, cutSide);                                       // Nyquist
+            for (int k = 1; k < kHalf; k++) {
+                float mL = k < kBins ? maskAt(&view, 0, t, k) : hiL;
+                float mR = k < kBins ? maskAt(&view, 1, t, k) : hiR;
+                unmix(&reL[k], &reR[k], mL, mR, cutLead, cutSide);
+                unmix(&imL[k], &imR[k], mL, mR, cutLead, cutSide);
+            }
+
             int64_t base = (f0 + j) * kH;
             for (int c = 0; c < 2; c++) {
-                float *re = s->specRe + (c * kB + j) * kHalf, *im = s->specIm + (c * kB + j) * kHalf;
-                int t = kT - kB + j;
-                re[0] *= 1.0f - cj * maskAt(&view, c, t, 0);
-                for (int k = 1; k < kBins; k++) {
-                    float g = 1.0f - cj * maskAt(&view, c, t, k);
-                    re[k] *= g;
-                    im[k] *= g;
-                }
+                float *re = c ? reR : reL, *im = c ? imR : imL;
                 irfft(re, im, frameOut, s->tmp[0], s->tmp[1]);
                 float *ring = s->outRing[c];
                 // this frame is the first to reach its last hop: clear it before adding
@@ -327,6 +369,7 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
         s->nextFrame = f0 + kB;
         s->outReady = s->nextFrame * kH;          // nothing later overlaps these samples any more
         s->lastCut = cut;
+        s->lastBacking = backing;
         s->inferMs = s->blocks ? s->inferMs * 0.9 + ms * 0.1 : ms;
         s->blocks++;
         while (s.held.count) {
@@ -457,9 +500,9 @@ NSString *DZSingStatus(void) {
     if (!s) return [NSString stringWithFormat:@"sing: vocals %d%%, waiting for playback%@", (int)lroundf((1 - cut) * 100),
                     last ? [@" · " stringByAppendingString:last] : @""];
     os_unfair_lock_lock(&s->lock);
-    NSString *line = [NSString stringWithFormat:@"sing: vocals %d%% · player #%lu %@ · held %.2f s · player queue %.2f s · "
-                      @"%llu blocks · model %.0f ms%@",
-                      (int)lroundf((1 - cut) * 100), (unsigned long)s.serial,
+    NSString *line = [NSString stringWithFormat:@"sing: vocals %d%%, backing %d%% kept · player #%lu %@ · held %.2f s · "
+                      @"player queue %.2f s · %llu blocks · model %.0f ms%@",
+                      (int)lroundf((1 - cut) * 100), (int)lroundf(DZPrefsAudioParams().backingKeep * 100), (unsigned long)s.serial,
                       s->degraded ? @"PAUSED" : (s->holding ? @"separating" : @"warming up"),
                       s.held.count ? (s->inCount - s.held.firstObject.start) / kSampleRate : 0.0,
                       atomic_load(&s->playerFrames) / kSampleRate, (unsigned long long)s->blocks, s->inferMs,
