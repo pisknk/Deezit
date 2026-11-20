@@ -141,11 +141,16 @@ def diagnose(ct, onnx_file, x, ref, label):
     print("::notice title=%s diagnosis: PyTorch vs ONNX::SNR %.1f dB" % (label, snr_db(ref, tout)))
 
     vals = {}
+    seen = {xt.data_ptr()}
 
     class Capture(Interpreter):
         def run_node(self, n):
             r = super().run_node(n)
-            if n.op.startswith("call_") and isinstance(r, torch.Tensor) and r.dim() >= 2 and r.is_floating_point():
+            # skip pass-throughs (same storage as the input or an earlier layer):
+            # Core ML can't have one variable as two outputs, or as input and output
+            if (n.op.startswith("call_") and isinstance(r, torch.Tensor) and r.dim() >= 2 and r.is_floating_point()
+                    and r.data_ptr() not in seen):
+                seen.add(r.data_ptr())
                 vals[n.name] = r.detach().numpy().copy()
             return r
 
