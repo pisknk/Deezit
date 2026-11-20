@@ -321,8 +321,13 @@ def main():
 
         ours16 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT16, "ours16-" + pkg, x, ref)
         ours32 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT32, "ours32-" + pkg)
+        # fp16 except the matrix multiplications (the frequency-mixing dense
+        # layers, which sum over up to 3072 bins): Voc FT lost too much in pure fp16
+        mixed = convert_onnx(ct, onnx_file, dim_f,
+                             ct.transform.FP16ComputePrecision(op_selector=lambda op: op.op_type != "matmul"),
+                             "oursmix-" + pkg)
         results = {}
-        for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16), ("ours fp32", ours32)):
+        for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16), ("ours fp16 + fp32 matmul", mixed), ("ours fp32", ours32)):
             for units_name, units in (("CPU", ct.ComputeUnit.CPU_ONLY), ("CPU+NE", ct.ComputeUnit.CPU_AND_NE)):
                 results[(tag, units_name)] = check(ct, path, x, ref, units)
         summary = ", ".join("%s on %s %.1f dB" % (t, u, v) for (t, u), v in results.items())
@@ -336,22 +341,23 @@ def main():
         # the runner, Core ML fp32 got a lone 2x2 stride-2 Conv2d to only 20.2 dB
         # against PyTorch, fed PyTorch's exact input.)
         chosen = None
-        for tag, path in (("ours fp16", ours16), ("gyoom fp16", pkg)):
+        for tag, path in (("ours fp16", ours16), ("ours fp16 + fp32 matmul", mixed), ("gyoom fp16", pkg)):
             worst = min(results[(tag, "CPU")], results[(tag, "CPU+NE")])
             if worst >= 25:
                 chosen = (tag, path, worst)
                 break
         if not chosen:
-            try:
-                diagnose(ct, onnx_file_kept, x, ref, label)
-            except Exception as e:
-                print("::warning title=%s diagnosis failed::%s: %s" % (label, type(e).__name__, str(e)[:800].replace("\n", " ")))
-            sys.exit("%s: no fp16 Core ML version stays within 25 dB of ONNX: %s" % (label, summary))
+            # skipped, not fatal: the other models still get published
+            print("::warning title=%s skipped::no fp16 Core ML version stays within 25 dB of ONNX: %s" % (label, summary))
+            for extra in (pkg, ours16, ours32, mixed):
+                shutil.rmtree(extra, ignore_errors=True)
+            os.remove(onnx_file)
+            continue
         print("::notice title=%s chosen::%s (worst %.1f dB)" % (label, chosen[0], chosen[2]))
         if chosen[1] != pkg:
             shutil.rmtree(pkg)
             shutil.move(chosen[1], pkg)
-        for extra in (ours16, ours32):
+        for extra in (ours16, ours32, mixed):
             shutil.rmtree(extra, ignore_errors=True)
         os.remove(onnx_file)
 
@@ -376,6 +382,8 @@ def main():
         print("::notice title=%s model::%s %.1f MB" % (label, archive, entry["bytes"] / 1e6))
         entries.append(entry)
 
+    if not entries:
+        sys.exit("no model passed")
     meta = {
         "model": "uvr-mdx-net", "format": "aar-mlpackage-per-window", "sample_rate": RATE,
         "licence": "MIT (UVR MDX-Net by Anjok07 and Kimberley Jensen; see LICENSE-UVR-MDX-CoreML.txt)",
