@@ -7,7 +7,7 @@
 
 NSString *const DZDemucsChangedNotification = @"DZDemucsChangedNotification";
 
-static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-htdemucs-v1/";
+static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-htdemucs-v2/";
 static NSString *const kDZMeta = @"DeezitDemucs.json";
 
 static NSObject *sLock;
@@ -28,6 +28,10 @@ static NSURL *dir(void) {
 static NSURL *compiledURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.mlmodelc" isDirectory:YES]; }
 static NSURL *packageURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.mlpackage" isDirectory:YES]; }
 static NSURL *archiveURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.download.aar"]; }
+static NSURL *metaURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.json"]; }
+static NSURL *metaPendingURL(void) { return [dir() URLByAppendingPathComponent:@"DeezitDemucs.download.json"]; }
+static NSArray<NSDictionary *> *functionsList(void);
+static NSURL *resultURL(void);
 
 static void recoverCrash(void);
 
@@ -41,7 +45,14 @@ static void setup(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         sLock = [NSObject new];
-        sState = [NSFileManager.defaultManager fileExistsAtPath:compiledURL().path] ? DZDemucsReady : DZDemucsNotInstalled;
+        BOOL have = [NSFileManager.defaultManager fileExistsAtPath:compiledURL().path];
+        if (have && !functionsList().count) {
+            // the first, single-window (7.8 s) model: replaced by the multi-window one
+            [NSFileManager.defaultManager removeItemAtURL:compiledURL() error:nil];
+            [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
+            have = NO;
+        }
+        sState = have ? DZDemucsReady : DZDemucsNotInstalled;
         recoverCrash();
     });
 }
@@ -115,7 +126,10 @@ static void install(void) {
             setState(DZDemucsFailed, err.localizedDescription ?: @"couldn't store the model");
             return;
         }
-        DZLog("demucs: model installed (%.0f MB compiled)", folderSize(compiledURL()) / 1e6);
+        [NSFileManager.defaultManager removeItemAtURL:metaURL() error:nil];
+        [NSFileManager.defaultManager moveItemAtURL:metaPendingURL() toURL:metaURL() error:nil];
+        DZLog("demucs: model installed (%.0f MB compiled, %lu windows)", folderSize(compiledURL()) / 1e6,
+              (unsigned long)functionsList().count);
         setState(DZDemucsReady, nil);
     });
 }
@@ -145,8 +159,9 @@ void DZDemucsDownload(void) {
     }
     notify();
     // the release's JSON names the archive and its size
-    NSURL *metaURL = [NSURL URLWithString:[kDZRelease stringByAppendingString:kDZMeta]];
-    NSURLSessionDataTask *metaTask = [NSURLSession.sharedSession dataTaskWithURL:metaURL
+    NSURL *remoteMeta = [NSURL URLWithString:[kDZRelease stringByAppendingString:kDZMeta]];
+    NSURLRequest *metaReq = [NSURLRequest requestWithURL:remoteMeta cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:30];
+    NSURLSessionDataTask *metaTask = [NSURLSession.sharedSession dataTaskWithRequest:metaReq
                                                                completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         NSDictionary *meta = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSString *file = [meta isKindOfClass:[NSDictionary class]] ? meta[@"file"] : nil;
@@ -155,6 +170,7 @@ void DZDemucsDownload(void) {
             setState(DZDemucsFailed, err.localizedDescription ?: @"model not published yet");
             return;
         }
+        [data writeToURL:metaPendingURL() atomically:YES];   // kept with the model: lists its windows
         DZLog("demucs: downloading %@ (%.0f MB)", file, [meta[@"bytes"] doubleValue] / 1e6);
         NSURL *url = [NSURL URLWithString:[kDZRelease stringByAppendingString:file]];
         NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:60];
@@ -193,17 +209,37 @@ void DZDemucsDelete(void) {
         sBenchResult = nil;
     }
     [NSFileManager.defaultManager removeItemAtURL:compiledURL() error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:metaURL() error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
     DZLog("demucs: model deleted");
     setState(DZDemucsNotInstalled, nil);
 }
 
 #pragma mark - benchmark
 
-static MLModelConfiguration *config(void) {
+// The package holds one Core ML function per window length (see
+// tools/vocal_model/convert_htdemucs.py); the release's JSON, kept next to the
+// model, lists them: name, seconds, samples, frames.
+static NSArray<NSDictionary *> *functionsList(void) {
+    NSData *data = [NSData dataWithContentsOfURL:metaURL()];
+    NSDictionary *meta = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSArray *list = [meta isKindOfClass:[NSDictionary class]] ? meta[@"functions"] : nil;
+    if (![list isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    for (NSDictionary *f in list) {
+        if ([f isKindOfClass:[NSDictionary class]] && [f[@"name"] isKindOfClass:[NSString class]] && [f[@"seconds"] isKindOfClass:[NSNumber class]])
+            [out addObject:f];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"seconds"] compare:b[@"seconds"]]; }];
+    return out;
+}
+
+static MLModelConfiguration *config(NSString *function) {
     MLModelConfiguration *cfg = [MLModelConfiguration new];
     // the same units Sing must use with the screen locked: no GPU
     if (@available(iOS 16.0, *)) cfg.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
     else cfg.computeUnits = MLComputeUnitsAll;
+    if (@available(iOS 18.0, *)) cfg.functionName = function;
     return cfg;
 }
 
@@ -233,11 +269,11 @@ static MLDictionaryFeatureProvider *inputs(MLModel *model, NSString **error) {
 }
 
 // Share of the estimated compute on each unit, from Core ML's compute plan (iOS 17.4+).
-static NSString *computePlanSummary(void) {
+static NSString *computePlanSummary(NSString *function) {
     if (@available(iOS 17.4, *)) {
         __block NSString *summary = @"compute plan unavailable";
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
-        [MLComputePlan loadContentsOfURL:compiledURL() configuration:config()
+        [MLComputePlan loadContentsOfURL:compiledURL() configuration:config(function)
                        completionHandler:^(MLComputePlan *plan, NSError *err) {
             if (!plan) {
                 summary = [@"compute plan failed: " stringByAppendingString:err.localizedDescription ?: @"?"];
@@ -248,7 +284,8 @@ static NSString *computePlanSummary(void) {
             NSUInteger ops = 0, aneOps = 0, cpuOps = 0, gpuOps = 0;
             MLModelStructureProgram *program = plan.modelStructure.program;
             NSMutableArray<MLModelStructureProgramBlock *> *blocks = [NSMutableArray array];
-            for (MLModelStructureProgramFunction *fn in program.functions.allValues) [blocks addObject:fn.block];
+            MLModelStructureProgramFunction *only = program.functions[function];
+            for (MLModelStructureProgramFunction *fn in (only ? @[only] : program.functions.allValues)) [blocks addObject:fn.block];
             while (blocks.count) {
                 MLModelStructureProgramBlock *block = blocks.lastObject;
                 [blocks removeLastObject];
@@ -267,8 +304,8 @@ static NSString *computePlanSummary(void) {
             }
             double total = ane + cpu + gpu + unknown;
             if (total <= 0) total = 1;
-            summary = [NSString stringWithFormat:@"compute: Neural Engine %.0f%%, CPU %.0f%%, GPU %.0f%% (ops %lu / %lu / %lu of %lu)",
-                       ane / total * 100, cpu / total * 100, gpu / total * 100,
+            summary = [NSString stringWithFormat:@"compute (%@): Neural Engine %.0f%%, CPU %.0f%%, GPU %.0f%% (ops %lu / %lu / %lu of %lu)",
+                       function, ane / total * 100, cpu / total * 100, gpu / total * 100,
                        (unsigned long)aneOps, (unsigned long)cpuOps, (unsigned long)gpuOps, (unsigned long)ops];
             dispatch_semaphore_signal(done);
         }];
@@ -278,17 +315,19 @@ static NSString *computePlanSummary(void) {
     return @"compute plan needs iOS 17.4";
 }
 
-// The benchmark can get Deezer killed (most likely iOS's memory limit: the
-// whole 7.8 s window goes through the transformer at once). So each step is
-// written to a small file before it starts, with the lowest free memory seen
-// so far (sampled every 50 ms). If Deezer dies, the next launch turns that
-// file into the result: which step, and how close to the limit it got.
+// The benchmark can get Deezer killed by iOS's memory limit (the 7.8 s window
+// took ~2.2 GB to load on an iPhone 13). So each step is written to a small
+// file before it starts, with the results so far and the lowest free memory
+// seen (sampled every 10 ms). If Deezer dies, the next launch turns that file
+// into the result. Windows run shortest first, and a longer one is skipped
+// when the memory it would need (scaled from the previous one) isn't free.
 static NSURL *crumbURL(void) { return [dir() URLByAppendingPathComponent:@"benchmark.running.txt"]; }
 static NSURL *resultURL(void) { return [dir() URLByAppendingPathComponent:@"benchmark.result.txt"]; }
 
 static NSString *sCrumbStep;
 static NSString *sCrumbDone;         // results so far (survive a crash)
-static double sMinFreeMB = -1;
+static double sMinFreeMB = -1;       // whole benchmark
+static double sStepMinFreeMB = -1;   // current window
 
 static double freeMB(void) { return os_proc_available_memory() / 1048576.0; }
 
@@ -298,13 +337,20 @@ static void writeCrumb(void) {
     [[text dataUsingEncoding:NSUTF8StringEncoding] writeToURL:crumbURL() atomically:YES];
 }
 
+static void noteFree(double mb, BOOL force) {
+    @synchronized (sLock) {
+        if (sStepMinFreeMB < 0 || mb < sStepMinFreeMB) sStepMinFreeMB = mb;
+        if (force || sMinFreeMB < 0 || mb < sMinFreeMB - 5) {
+            if (sMinFreeMB < 0 || mb < sMinFreeMB) sMinFreeMB = mb;
+            writeCrumb();
+        }
+    }
+}
+
 static void step(NSString *name) {
     double mb = freeMB();
-    @synchronized (sLock) {
-        sCrumbStep = name;
-        if (sMinFreeMB < 0 || mb < sMinFreeMB) sMinFreeMB = mb;
-        writeCrumb();
-    }
+    @synchronized (sLock) { sCrumbStep = name; }
+    noteFree(mb, YES);
     DZLog("demucs: benchmark step: %@ (%.0f MB free)", name, mb);
 }
 
@@ -350,6 +396,67 @@ static void installExceptionNote(void) {
     });
 }
 
+// One window: load, first run, 4 timed runs. Returns its result line, or nil
+// with *failure set. *usedMB: the most memory it took (free before - lowest).
+static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failure) {
+    NSString *name = fn[@"name"];
+    double seconds = [fn[@"seconds"] doubleValue];
+    NSString *label = [NSString stringWithFormat:@"%.1f s window", seconds];
+    double before = freeMB();
+    @synchronized (sLock) { sStepMinFreeMB = before; }
+    // No pool around the whole function (an out-parameter set inside it would
+    // be released with it); small pools instead, so the model and its inputs
+    // are freed when this returns, before the next (bigger) window loads.
+    NSError *err = nil;
+    {
+        step([label stringByAppendingString:@": loading"]);
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        MLModel *model;
+        @autoreleasepool { model = [MLModel modelWithContentsOfURL:compiledURL() configuration:config(name) error:&err]; }
+        double loadS = CFAbsoluteTimeGetCurrent() - t0;
+        double afterLoad = freeMB();
+        NSString *problem = nil;
+        MLDictionaryFeatureProvider *in;
+        @autoreleasepool { in = model ? inputs(model, &problem) : nil; }
+        if (!model || !in) {
+            *failure = [NSString stringWithFormat:@"%@: %@", label, problem ?: err.localizedDescription ?: @"couldn't load"];
+            return nil;
+        }
+        step([label stringByAppendingString:@": first run (includes Neural Engine compile)"]);
+        t0 = CFAbsoluteTimeGetCurrent();
+        BOOL ok;
+        @autoreleasepool { ok = [model predictionFromFeatures:in error:&err] != nil; }
+        double firstS = CFAbsoluteTimeGetCurrent() - t0;
+        if (!ok) {
+            *failure = [NSString stringWithFormat:@"%@: first run failed: %@", label, err.localizedDescription ?: @"?"];
+            return nil;
+        }
+        step([label stringByAppendingString:@": timed runs"]);
+        NSMutableArray<NSNumber *> *runs = [NSMutableArray array];
+        for (int i = 0; i < 4; i++) {
+            @autoreleasepool {
+                t0 = CFAbsoluteTimeGetCurrent();
+                if (![model predictionFromFeatures:in error:&err]) break;
+                [runs addObject:@((CFAbsoluteTimeGetCurrent() - t0) * 1000)];
+            }
+        }
+        [runs sortUsingSelector:@selector(compare:)];
+        double median = runs.count ? runs[runs.count / 2].doubleValue : -1;
+        double lowest;
+        @synchronized (sLock) { lowest = sStepMinFreeMB; }
+        *usedMB = before - lowest;
+        // Live, windows would overlap by half: one window per half window of
+        // new audio. Using under 40% of that time leaves room for the rest.
+        double share = median / (seconds * 500);
+        NSString *verdict = median < 0 ? @"no timing" :
+            share <= 0.4 ? @"fast enough for live Sing" : share <= 0.8 ? @"borderline for live Sing" : @"too slow for live Sing";
+        return [NSString stringWithFormat:@"%@: %.0f ms per window (median of %lu), %.0f%% of the time live use allows - %@\n"
+                @"   memory: %.0f MB to load, %.0f MB at most · load %.1f s, first run %.1f s",
+                label, median, (unsigned long)runs.count, share * 100, verdict,
+                before - afterLoad, *usedMB, loadS, firstS];
+    }
+}
+
 void DZDemucsRunBenchmark(void) {
     setup();
     @synchronized (sLock) {
@@ -368,73 +475,52 @@ void DZDemucsRunBenchmark(void) {
 
     dispatch_source_t sampler = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(sampler, DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC, 2 * NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(sampler, ^{
-        double mb = freeMB();
-        @synchronized (sLock) {
-            if (sMinFreeMB < 0 || mb < sMinFreeMB - 5) { sMinFreeMB = mb; writeCrumb(); }
-        }
-    });
+    dispatch_source_set_event_handler(sampler, ^{ noteFree(freeMB(), NO); });
     dispatch_resume(sampler);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableArray<NSString *> *lines = [NSMutableArray array];
-
-        @autoreleasepool {
-            NSError *err = nil;
-            step(@"loading the model");
-            CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-            MLModel *model = [MLModel modelWithContentsOfURL:compiledURL() configuration:config() error:&err];
-            double loadS = CFAbsoluteTimeGetCurrent() - t0;
-            NSString *problem = nil;
-            MLDictionaryFeatureProvider *in = model ? inputs(model, &problem) : nil;
-            if (!model || !in) {
-                [lines addObject:[@"failed: " stringByAppendingString:problem ?: err.localizedDescription ?: @"couldn't load the model"]];
-            } else {
-                NSString *loaded = [NSString stringWithFormat:@"loaded in %.1f s", loadS];
-                addDone(loaded);
-                step(@"first run (includes Neural Engine compile)");
-                t0 = CFAbsoluteTimeGetCurrent();
-                BOOL ok;
-                @autoreleasepool { ok = [model predictionFromFeatures:in error:&err] != nil; }
-                double firstS = CFAbsoluteTimeGetCurrent() - t0;
-                if (!ok) {
-                    [lines addObject:[@"first run failed: " stringByAppendingString:err.localizedDescription ?: @"?"]];
-                } else {
-                    addDone([NSString stringWithFormat:@"first run %.1f s", firstS]);
-                    step(@"timed runs");
-                    NSMutableArray<NSNumber *> *runs = [NSMutableArray array];
-                    for (int i = 0; i < 4; i++) {
-                        @autoreleasepool {
-                            t0 = CFAbsoluteTimeGetCurrent();
-                            if (![model predictionFromFeatures:in error:&err]) break;
-                            [runs addObject:@((CFAbsoluteTimeGetCurrent() - t0) * 1000)];
-                        }
+        NSArray<NSDictionary *> *fns = functionsList();
+        NSString *smallest = fns.firstObject[@"name"];
+        if (@available(iOS 18.0, *)) {
+            if (!fns.count) [lines addObject:@"the model's function list is missing: delete and download it again"];
+            double prevUsed = 0, prevSeconds = 0;
+            for (NSDictionary *fn in fns) {
+                double seconds = [fn[@"seconds"] doubleValue];
+                if (prevSeconds > 0) {
+                    // attention memory grows with the square of the window; keep 300 MB spare
+                    double need = prevUsed * (seconds / prevSeconds) * (seconds / prevSeconds);
+                    double free = freeMB();
+                    if (free < need + 300) {
+                        NSString *skip = [NSString stringWithFormat:@"%.1f s window: skipped, would need about %.0f MB and %.0f MB is free",
+                                          seconds, need, free];
+                        [lines addObject:skip];
+                        addDone(skip);
+                        break;
                     }
-                    [runs sortUsingSelector:@selector(compare:)];
-                    double median = runs.count ? runs[runs.count / 2].doubleValue : -1;
-                    // Live use would run one 7.8 s window per ~1 s of new audio,
-                    // within Deezer's 3 s queue: under ~400 ms is comfortable.
-                    NSString *verdict = median < 0 ? @"no timing" :
-                        median <= 400 ? @"fast enough for live Sing" :
-                        median <= 900 ? @"borderline for live Sing (would need bigger steps)" : @"too slow for live Sing";
-                    NSString *timing = [NSString stringWithFormat:@"%.0f ms per 7.8 s window (median of %lu) - %@",
-                                        median, (unsigned long)runs.count, verdict];
-                    [lines insertObject:timing atIndex:0];
-                    addDone(timing);
-                    [lines addObject:[NSString stringWithFormat:@"%@, first run %.1f s (Neural Engine compile)", loaded, firstS]];
                 }
+                double used = 0;
+                NSString *failure = nil;
+                NSString *line = benchWindow(fn, &used, &failure);
+                if (!line) { [lines addObject:failure]; addDone(failure); break; }
+                [lines addObject:line];
+                addDone(line);
+                prevUsed = used;
+                prevSeconds = seconds;
             }
+            // Where each op would run (shortest window). Last: with the 7.8 s
+            // window this step alone got Deezer killed.
+            if (smallest) {
+                step(@"compute plan");
+                [lines addObject:computePlanSummary(smallest)];
+            }
+        } else {
+            [lines addObject:@"the HT-Demucs package needs iOS 18"];
         }
-        // Where each op would run. Last: on the iPhone 13 this step alone got Deezer
-        // killed (it prepares the model for every unit to estimate costs).
-        step(@"compute plan");
-        NSString *plan = computePlanSummary();
-        [lines addObject:plan];
-
         dispatch_source_cancel(sampler);
         double minFree;
         @synchronized (sLock) { minFree = sMinFreeMB; }
-        [lines addObject:[NSString stringWithFormat:@"memory: %.0f MB free before, lowest %.0f MB during", startFree, minFree]];
+        [lines addObject:[NSString stringWithFormat:@"memory: %.0f MB free at the start, lowest %.0f MB", startFree, minFree]];
 
         NSString *result = [lines componentsJoinedByString:@"\n"];
         DZLog("demucs: benchmark: %@", [result stringByReplacingOccurrencesOfString:@"\n" withString:@" · "]);
