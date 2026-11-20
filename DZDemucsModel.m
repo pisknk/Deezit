@@ -325,12 +325,29 @@ static void recoverCrash(void) {
         double minFree = parts.count > 1 ? parts[1].doubleValue : -1;
         NSString *done = parts.count > 2 ? [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)] componentsJoinedByString:@"\n"] : @"";
         NSString *result = [NSString stringWithFormat:@"Deezer closed during: %@ (lowest free memory seen %.0f MB; "
-                            @"near 0 means iOS's memory limit)%@%@",
+                            @"near 0 means iOS's memory limit; it's sampled every 10 ms, so a last spike can be missed)%@%@",
                             stepName, minFree, done.length ? @"\n" : @"", done];
         [[result dataUsingEncoding:NSUTF8StringEncoding] writeToURL:resultURL() atomically:YES];
         DZLog("demucs: last benchmark crashed: %@", [result stringByReplacingOccurrencesOfString:@"\n" withString:@" · "]);
     }
     sBenchResult = [NSString stringWithContentsOfURL:resultURL() encoding:NSUTF8StringEncoding error:nil];
+}
+
+static NSUncaughtExceptionHandler *sPrevHandler;
+
+static void exceptionNote(NSException *e) {
+    BOOL running;
+    @synchronized (sLock) { running = sBenchRunning; }
+    if (running) addDone([NSString stringWithFormat:@"exception: %@: %@", e.name, e.reason]);
+    if (sPrevHandler) sPrevHandler(e);
+}
+
+static void installExceptionNote(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sPrevHandler = NSGetUncaughtExceptionHandler();
+        NSSetUncaughtExceptionHandler(&exceptionNote);
+    });
 }
 
 void DZDemucsRunBenchmark(void) {
@@ -346,25 +363,21 @@ void DZDemucsRunBenchmark(void) {
     notify();
     double startFree = freeMB();
     DZLog("demucs: benchmark started (%.0f MB free)", startFree);
+    addDone([NSString stringWithFormat:@"%.0f MB free at the start", startFree]);
+    installExceptionNote();
 
     dispatch_source_t sampler = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-    dispatch_source_set_timer(sampler, DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    dispatch_source_set_timer(sampler, DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC, 2 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(sampler, ^{
         double mb = freeMB();
         @synchronized (sLock) {
-            if (sMinFreeMB < 0 || mb < sMinFreeMB - 10) { sMinFreeMB = mb; writeCrumb(); }
+            if (sMinFreeMB < 0 || mb < sMinFreeMB - 5) { sMinFreeMB = mb; writeCrumb(); }
         }
     });
     dispatch_resume(sampler);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableArray<NSString *> *lines = [NSMutableArray array];
-
-        // 1. where it would run: needs no prediction, so it's known even if running it fails
-        step(@"compute plan");
-        NSString *plan = computePlanSummary();
-        [lines addObject:plan];
-        addDone(plan);
 
         @autoreleasepool {
             NSError *err = nil;
@@ -404,12 +417,20 @@ void DZDemucsRunBenchmark(void) {
                     NSString *verdict = median < 0 ? @"no timing" :
                         median <= 400 ? @"fast enough for live Sing" :
                         median <= 900 ? @"borderline for live Sing (would need bigger steps)" : @"too slow for live Sing";
-                    [lines insertObject:[NSString stringWithFormat:@"%.0f ms per 7.8 s window (median of %lu) - %@",
-                                         median, (unsigned long)runs.count, verdict] atIndex:0];
+                    NSString *timing = [NSString stringWithFormat:@"%.0f ms per 7.8 s window (median of %lu) - %@",
+                                        median, (unsigned long)runs.count, verdict];
+                    [lines insertObject:timing atIndex:0];
+                    addDone(timing);
                     [lines addObject:[NSString stringWithFormat:@"%@, first run %.1f s (Neural Engine compile)", loaded, firstS]];
                 }
             }
         }
+        // Where each op would run. Last: on the iPhone 13 this step alone got Deezer
+        // killed (it prepares the model for every unit to estimate costs).
+        step(@"compute plan");
+        NSString *plan = computePlanSummary();
+        [lines addObject:plan];
+
         dispatch_source_cancel(sampler);
         double minFree;
         @synchronized (sLock) { minFree = sMinFreeMB; }
