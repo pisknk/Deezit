@@ -16,6 +16,7 @@ extern NSString *const kDZReverbRoom;   // float 0 ... 1 (room size / decay)
 extern NSString *const kDZReverbDamp;   // float 0 ... 1 (high-frequency damping)
 extern NSString *const kDZPreset;       // NSString preset identifier, "custom" after manual edits
 extern NSString *const kDZLockArtwork;  // BOOL  animated album covers on the lock screen (iOS 26+)
+extern NSString *const kDZVocals;       // float 0 ... 1 vocal level ("Sing"): 1 = untouched, 0 = centre vocals removed
 extern NSString *const kDZAudioHook;    // BOOL  kill switch: NO = never touch Deezer's audio graph
                                         //       (read at launch, set from the debug panel)
 

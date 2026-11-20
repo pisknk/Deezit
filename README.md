@@ -22,8 +22,9 @@ generator (plain ObjC runtime).
 | Settings page (switch, presets, sliders, reset) | done, saves prefs |
 | Prefs → realtime-safe audio params | done |
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
-| Animated lock-screen covers | Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` (new, not yet tested on a device) |
-| ••• menu row | "Playback Controls" as the first option of the full-screen player's ••• menu (the bottom-of-menu version works on device; first-row version new, not yet tested) |
+| Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
+| ••• menu row | **working**: "Playback Controls" as the first option of the full-screen player's ••• menu |
+| Sing (vocal reduction) | DSP version: "Vocals" slider, mid/side removal of the centre voice band (new, not yet tested on a device); an ML separator is planned |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -70,6 +71,26 @@ cyan -i Deezer.ipa -o Deezer-Deezit.ipa -f .theos/obj/Deezit.dylib
 
 Then sideload `Deezer-Deezit.ipa` as usual.
 
+## Sing (vocal reduction)
+
+Playback Controls → **Sing → Vocals** turns the lead voice down (100% =
+untouched). It's Deezit's own audio unit (`DZVocalUnit.m` + `DZVocals.c`),
+first in the chain after Deezer's mixer, so the slider acts instantly and
+works with or without Slowed + Reverb:
+
+- the mix is split into mid (L+R) and side (L-R)
+- the voice band of the mid, about 120 Hz - 8 kHz, is removed by the slider
+  amount; bass, kick, cymbals and everything panned off-centre stay
+
+It's a plain DSP trick, so it works best on studio tracks with a centred,
+dry lead vocal; centred instruments in the same range (snare, some synths)
+drop too. A machine-learning separator is the planned upgrade: Deezer queues
+3 s of decoded audio ahead of playback (see `DZBufferProbe.x`), enough to
+separate each chunk before it plays without delaying anything.
+
+If the engine won't start with the unit, Deezit removes just that unit and
+retries, so slowed + reverb keep working.
+
 ## Animated lock-screen covers
 
 On iOS 26 and later, Deezit shows the Apple Music motion cover of the album
@@ -79,8 +100,10 @@ Deezer's own process, so no jailbreak is needed:
 
 1. hooks `-[MPNowPlayingInfoCenter setNowPlayingInfo:]` and reads the title,
    artist and album Deezer sets
-2. finds the album on Apple Music with the public iTunes Search API, then its
-   `editorialVideo` motion cover through the catalog API (web-player token)
+2. finds the album's motion cover through Apple Music's catalog search
+   (`editorialVideo`, web-player token), picking among same-name albums the
+   one that has a cover; if the album has none, the song's other releases
+   (singles first) are tried
 3. downloads the HLS variant nearest 1100 px wide as one MP4 into
    `Library/Caches/Deezit/motion` (kept under 150 MB)
 4. adds an `MPMediaItemAnimatedArtwork` under the 3:4 (or 1:1) key iOS offers
@@ -106,7 +129,9 @@ DZPrefs.*                   NSUserDefaults suite + atomic mirror for the audio t
 DZAudioParams.h             plain-C params struct shared with the DSP
 DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / Nightcore
 DZDSP.*                     engine-agnostic DSP core (C)
-DZAudioHook.x               AVAudioEngine backend: splices varispeed + reverb before the output node
+DZVocals.* / DZVocalUnit.*  "Sing": mid/side vocal reduction (C) as an in-process AUAudioUnit
+DZAudioHook.x               AVAudioEngine backend: splices vocals + varispeed + reverb before the output node
+DZBufferProbe.x             logs how Deezer schedules audio (sizing the future ML separator)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
 DZLockArtwork.x             animated lock-screen cover (now-playing hook)

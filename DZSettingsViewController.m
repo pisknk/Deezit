@@ -5,6 +5,7 @@
 
 typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionEffect,
+    DZSectionSing,
     DZSectionPresets,
     DZSectionSpeed,
     DZSectionReverb,
@@ -132,6 +133,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     [UIView performWithoutAnimation:^{
         NSMutableIndexSet *s = [NSMutableIndexSet indexSetWithIndex:DZSectionSpeed];
         [s addIndex:DZSectionReverb];
+        [s addIndex:DZSectionSing];
         [self.tableView reloadSections:s withRowAnimation:UITableViewRowAnimationNone];
     }];
 }
@@ -143,6 +145,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case DZSectionEffect: return 1;
+        case DZSectionSing: return 1;
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
@@ -154,6 +157,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     switch (section) {
+        case DZSectionSing: return @"Sing";
         case DZSectionPresets: return @"Presets";
         case DZSectionSpeed: return @"Speed";
         case DZSectionReverb: return @"Reverb";
@@ -166,6 +170,9 @@ typedef NS_ENUM(NSInteger, DZSection) {
     switch (section) {
         case DZSectionEffect:
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
+        case DZSectionSing:
+            return @"Turns down the voice in the centre of the mix; bass, drums and anything panned to the sides stay. "
+                   @"Works with or without Slowed + Reverb. Best on studio tracks with a centred lead vocal.";
         case DZSectionSpeed:
             return @"Pitch follows speed, like a turntable: slower is deeper.";
         case DZSectionLockScreen:
@@ -210,6 +217,11 @@ typedef NS_ENUM(NSInteger, DZSection) {
             c.selectionStyle = UITableViewCellSelectionStyleDefault;
             return c;
         }
+        case DZSectionSing:
+            return [self sliderCell:tv at:ip title:@"Vocals" key:kDZVocals min:0 max:1
+                             format:^NSString *(float v) {
+                                 return v >= 0.995f ? @"100% (off)" : [NSString stringWithFormat:@"%d%%", (int)lroundf(v * 100)];
+                             }];
         case DZSectionSpeed:
             return [self sliderCell:tv at:ip title:@"Speed" key:kDZSpeed
                                 min:kDZSpeedMin max:kDZSpeedMax
@@ -282,6 +294,13 @@ typedef NS_ENUM(NSInteger, DZSection) {
     if ([cell.prefKey isEqualToString:kDZSpeed]) {
         // light detent at 1.00x so "normal speed" is easy to hit
         if (fabsf(v - 1.0f) < 0.015f) { v = 1.0f; slider.value = v; }
+    }
+    if ([cell.prefKey isEqualToString:kDZVocals]) {
+        // snap to 100% so "off" is easy to hit; vocals aren't part of the presets
+        if (v > 0.98f) { v = 1.0f; slider.value = v; }
+        [cell refreshValueLabel];
+        DZPrefSet(kDZVocals, @(v));
+        return;
     }
     [cell refreshValueLabel];
     DZPrefSetMany(@{ cell.prefKey: @(v), kDZPreset: @"custom" });

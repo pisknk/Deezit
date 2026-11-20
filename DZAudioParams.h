@@ -10,6 +10,8 @@ typedef struct {
     float reverbMix;   // 0 ... 1
     float reverbRoom;  // 0 ... 1
     float reverbDamp;  // 0 ... 1
+    float vocalCut;    // 0 = vocals untouched ... 1 = centre vocal band removed
+                       // (independent of `enabled`; 0 before prefs load)
 } DZAudioParams;
 
 #ifdef __cplusplus

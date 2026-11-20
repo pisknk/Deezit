@@ -22,6 +22,8 @@ Deezit_FILES = Tweak.x \
 	DZPrefs.m \
 	DZPresets.m \
 	DZDSP.c \
+	DZVocals.c \
+	DZVocalUnit.m \
 	DZAudioHook.x \
 	DZBufferProbe.x \
 	DZProbes.x \
