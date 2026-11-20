@@ -198,14 +198,23 @@ def main():
         res = ml.predict({"mix": mix.numpy(), "spec": spec.numpy()})
         print("Core ML predict on the runner: %.2f s" % (time.time() - t0))
         print("::notice title=runner predict::%.2f s per 7.8 s window (Mac, not the phone)" % (time.time() - t0))
+        got = {}
         for name, want in (("vocals_spec", vs), ("vocals_wave", vw)):
-            got = np.asarray(res[name]).reshape(want.shape)
+            got[name] = np.asarray(res[name]).reshape(want.shape).astype(np.float32)
             w = want.numpy()
-            rel = np.abs(got - w).mean() / (np.abs(w).mean() + 1e-9)
-            print("Core ML vs PyTorch %-11s: mean relative error %.3f" % (name, rel))
-            print("::notice title=Core ML vs PyTorch %s::mean relative error %.3f" % (name, rel))
-            if not np.isfinite(got).all() or rel > 0.1:
-                sys.exit("Core ML output is too far from PyTorch (%s)" % name)
+            rel = np.abs(got[name] - w).mean() / (np.abs(w).mean() + 1e-9)
+            # relative to the output itself: inflated when the input has little voice (fp16 noise / tiny signal)
+            print("::notice title=Core ML vs PyTorch %s::mean error %.3f of the output's own level" % (name, rel))
+            if not np.isfinite(got[name]).all():
+                sys.exit("Core ML output has NaN / inf (%s)" % name)
+        # What matters is what you'd hear: the rebuilt vocals' error against the mix level
+        with torch.no_grad():
+            spec_ml = torch.from_numpy(got["vocals_spec"]).view(1, 1, 2, 2, F, T).permute(0, 1, 2, 4, 5, 3).contiguous()
+            vocals_ml = torch.from_numpy(got["vocals_wave"])[0] + model._ispec(torch.view_as_complex(spec_ml)[:, 0], L)[0]
+        err_db = 20 * math.log10(float((vocals_ml - rebuilt).pow(2).mean().sqrt()) / float(mix.pow(2).mean().sqrt()) + 1e-12)
+        print("::notice title=Core ML vs PyTorch rebuilt vocals::error %.1f dB below the mix" % -err_db)
+        if err_db > -26:
+            sys.exit("Core ML rebuilt vocals differ from PyTorch by %.1f dB of the mix (need <= -26 dB)" % err_db)
 
     archive = a.out + ".aar"
     subprocess.run(["aa", "archive", "-d", a.out, "-o", archive], check=True)
