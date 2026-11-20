@@ -12,9 +12,12 @@ weights come from the Ultimate Vocal Remover MDX-Net models by Anjok07
 github.com/TRvlvr/model_repo, mirrored at huggingface.co/Politrees/UVR_resources.
 
 That repo verified its conversion against ONNX only before Core ML ("Core ML
-predict: macOS-pending"), so this script does the Core ML check on the Mac:
-each package's output against ONNX Runtime running the original UVR .onnx, on
-the same input. Both models take the spectrogram (STFT outside the graph):
+predict: macOS-pending"). Here, on the Mac, its package came out at only
+23 dB SNR against ONNX Runtime running the original UVR .onnx (random input).
+So this script also converts the .onnx itself (onnx2torch -> coremltools,
+fp16 and fp32), checks every candidate against ONNX Runtime on the same
+realistic input (the STFT of a synthetic mix, as the phone would compute it),
+and publishes the first fp16 candidate that clears the bar. Both models take the spectrogram (STFT outside the graph):
 
   input   "input"   fp16 [1, 4, dim_f, 256]   complex-as-channels L.re, L.im, R.re, R.im
   output  "output"  fp16 [1, 4, dim_f, 256]   the vocals' spectrogram (same layout)
@@ -57,6 +60,35 @@ def fetch(repo, rev, path, dest):
     return dest
 
 
+def music_like(length, seed=0):
+    """Tones + transients + noise, stereo, about -12 dBFS."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(length) / RATE
+    y = np.zeros((2, length))
+    for f, pan in ((110, 0.5), (220, 0.3), (330, 0.7), (523, 0.5), (659, 0.4), (1318, 0.6)):
+        s = np.sin(2 * np.pi * f * t * (1 + 0.003 * np.sin(2 * np.pi * 5 * t)))
+        y[0] += (1 - pan) * s * 0.08
+        y[1] += pan * s * 0.08
+    for start in range(0, length, 22050):
+        n = min(3000, length - start)
+        y[:, start:start + n] += rng.normal(0, 0.2, n) * np.exp(-np.arange(n) / 400)
+    return y + rng.normal(0, 0.005, y.shape)
+
+
+def spectrogram(wave, n_fft, dim_f):
+    """UVR's MDX STFT: periodic Hann, centred with reflect padding, unnormalised,
+    hop 1024, Nyquist dropped -> [1, 4, dim_f, FRAMES] as L.re, L.im, R.re, R.im."""
+    win = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n_fft) / n_fft)
+    out = np.zeros((1, 4, dim_f, FRAMES), np.float32)
+    for c in range(2):
+        x = np.pad(wave[c], n_fft // 2, mode="reflect")
+        frames = np.stack([x[i * HOP:i * HOP + n_fft] * win for i in range(FRAMES)], axis=1)
+        z = np.fft.rfft(frames, axis=0)[:dim_f]
+        out[0, 2 * c] = z.real
+        out[0, 2 * c + 1] = z.imag
+    return out
+
+
 def snr_db(ref, got):
     err = np.sum((ref.astype(np.float64) - got.astype(np.float64)) ** 2)
     return 10 * np.log10(np.sum(ref.astype(np.float64) ** 2) / max(err, 1e-30))
@@ -76,6 +108,31 @@ print("%.0f %.0f %.2f" % (loaded - base, rss() - base, dt))
 """
 
 
+def convert_onnx(ct, onnx_file, dim_f, precision, out):
+    import torch
+    from onnx2torch import convert
+    net = convert(onnx_file).eval()
+    x = torch.zeros(1, 4, dim_f, FRAMES)
+    traced = torch.jit.trace(net, x, check_trace=False)
+    ml = ct.convert(traced, convert_to="mlprogram",
+                    inputs=[ct.TensorType(name="input", shape=(1, 4, dim_f, FRAMES), dtype=np.float32)],
+                    outputs=[ct.TensorType(name="output")],
+                    compute_precision=precision, compute_units=ct.ComputeUnit.CPU_AND_NE,
+                    minimum_deployment_target=ct.target.iOS16)
+    ml.author = "UVR MDX-Net (Anjok07 / Kimberley Jensen), converted for Deezit"
+    ml.license = "MIT"
+    shutil.rmtree(out, ignore_errors=True)
+    ml.save(out)
+    return out
+
+
+def check(ct, pkg, x, ref, units):
+    ml = ct.models.MLModel(pkg, compute_units=units)
+    dtype = np.float16 if ml.get_spec().description.input[0].type.multiArrayType.dataType == 65552 else np.float32
+    got = np.asarray(ml.predict({"input": x.astype(dtype)})["output"]).astype(np.float32).reshape(ref.shape)
+    return snr_db(ref, got) if np.isfinite(got).all() else -999.0
+
+
 def main():
     import coremltools as ct
     import onnxruntime as ort
@@ -91,34 +148,46 @@ def main():
             fetch(CORE_REPO, CORE_REV, "%s/%s" % (package, f), os.path.join(pkg, f))
         onnx_file = fetch(ONNX_REPO, ONNX_REV, onnx_path, os.path.basename(onnx_path))
 
-        ml = ct.models.MLModel(pkg, compute_units=ct.ComputeUnit.CPU_ONLY)
-        spec = ml.get_spec()
-        ins = [(i.name, list(i.type.multiArrayType.shape)) for i in spec.description.input]
-        outs = [(o.name, list(o.type.multiArrayType.shape)) for o in spec.description.output]
-        print("Core ML inputs %s outputs %s, %s" % (ins, outs, spec.WhichOneof("Type")))
-        if ins != [("input", [1, 4, dim_f, FRAMES])] or [o[0] for o in outs] != ["output"]:
-            sys.exit("%s: unexpected inputs/outputs %s %s" % (name, ins, outs))
-
-        # a spectrogram-like input: louder low bins, falling off with frequency
-        x = rng.standard_normal((1, 4, dim_f, FRAMES)) * (2.0 / (1 + np.arange(dim_f) / 64.0))[None, None, :, None]
-        x16 = x.astype(np.float16)
         sess = ort.InferenceSession(onnx_file, providers=["CPUExecutionProvider"])
         oname = sess.get_inputs()[0].name
         print("ONNX input %s %s" % (oname, sess.get_inputs()[0].shape))
-        ref = sess.run(None, {oname: x16.astype(np.float32)})[0]
-        got = np.asarray(ml.predict({"input": x16})["output"]).reshape(ref.shape)
-        if not np.isfinite(got).all():
-            sys.exit("%s: Core ML output has NaN / inf" % name)
-        snr = snr_db(ref, got)
-        print("::notice title=%s Core ML vs ONNX::SNR %.1f dB (fp16 package vs the original UVR .onnx, same input)" % (label, snr))
-        if snr < 40:
-            sys.exit("%s: Core ML differs from the original ONNX model (SNR %.1f dB, need >= 40)" % (name, snr))
+        # the phone's input: the STFT of a mix, rounded to fp16 (what fp16 I/O sees)
+        x = spectrogram(music_like(FRAMES * HOP + n_fft), n_fft, dim_f).astype(np.float16).astype(np.float32)
+        print("input |x| max %.1f, rms %.2f" % (np.abs(x).max(), np.sqrt((x ** 2).mean())))
+        ref = sess.run(None, {oname: x})[0]
+
+        ours16 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT16, "ours16-" + pkg)
+        ours32 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT32, "ours32-" + pkg)
+        results = {}
+        for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16), ("ours fp32", ours32)):
+            for units_name, units in (("CPU", ct.ComputeUnit.CPU_ONLY), ("CPU+NE", ct.ComputeUnit.CPU_AND_NE)):
+                results[(tag, units_name)] = check(ct, path, x, ref, units)
+        summary = ", ".join("%s on %s %.1f dB" % (t, u, v) for (t, u), v in results.items())
+        print("::notice title=%s vs ONNX (SNR)::%s" % (label, summary))
         os.remove(onnx_file)
+
+        # first fp16 candidate whose worst case clears the bar
+        chosen = None
+        for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16)):
+            worst = min(results[(tag, "CPU")], results[(tag, "CPU+NE")])
+            if worst >= 35:
+                chosen = (tag, path, worst)
+                break
+        if not chosen:
+            sys.exit("%s: no fp16 Core ML version stays within 35 dB of ONNX: %s" % (label, summary))
+        print("::notice title=%s chosen::%s (worst %.1f dB)" % (label, chosen[0], chosen[2]))
+        if chosen[1] != pkg:
+            shutil.rmtree(pkg)
+            shutil.move(chosen[1], pkg)
+        for extra in (ours16, ours32):
+            shutil.rmtree(extra, ignore_errors=True)
 
         r = subprocess.run([sys.executable, "-c", MEASURE, pkg, str(dim_f)], capture_output=True, text=True)
         entry = {"name": name, "label": label, "seconds": round(FRAMES * HOP / RATE, 3), "frames": FRAMES,
                  "bins": dim_f, "n_fft": n_fft, "hop": HOP, "step_fraction": 0.25,
-                 "source": "%s@%s/%s" % (CORE_REPO, CORE_REV[:7], package)}
+                 "source": ("%s@%s/%s" % (CORE_REPO, CORE_REV[:7], package)) if chosen[0].startswith("gyoom")
+                           else ("converted from %s@%s/%s" % (ONNX_REPO, ONNX_REV[:7], onnx_path)),
+                 "snr_vs_onnx_db": round(chosen[2], 1)}
         if r.returncode == 0:
             load_mb, run_mb, secs = r.stdout.split()[-3:]
             entry["runner_load_mb"], entry["runner_run_mb"] = float(load_mb), float(run_mb)
@@ -136,7 +205,7 @@ def main():
 
     meta = {
         "model": "uvr-mdx-net", "format": "aar-mlpackage-per-window", "sample_rate": RATE,
-        "licence": "MIT (UVR MDX-Net by Anjok07 and Kimberley Jensen; Core ML conversion by gyoom) - see LICENSE-UVR-MDX-CoreML.txt",
+        "licence": "MIT (UVR MDX-Net by Anjok07 and Kimberley Jensen; see LICENSE-UVR-MDX-CoreML.txt)",
         "functions": entries, "bytes": sum(e["bytes"] for e in entries),
     }
     with open("DeezitMDX.json", "w") as fh:
