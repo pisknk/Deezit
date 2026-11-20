@@ -55,9 +55,15 @@ def fetch(repo, rev, path, dest):
     url = "https://huggingface.co/%s/resolve/%s/%s" % (repo, rev, path)
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "deezit-ci"})
-    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as fh:
-        shutil.copyfileobj(r, fh)
-    return dest
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as fh:
+                shutil.copyfileobj(r, fh)
+            return dest
+        except OSError as e:          # connection resets happen; retry
+            print("download %s failed (%s), retrying" % (path, e))
+            time.sleep(10 * (attempt + 1))
+    sys.exit("couldn't download %s" % url)
 
 
 def music_like(length, seed=0):
