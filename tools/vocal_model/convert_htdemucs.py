@@ -213,12 +213,13 @@ def convert_window(model, ct, name, seconds):
     return {"name": name, "seconds": round(L / model.samplerate, 3), "samples": L, "frames": T, "bins": F}
 
 
+# Loads one function of the compiled model (what the phone gets) and runs it.
 MEASURE = r'''
 import resource, sys, time, numpy as np, coremltools as ct
 path, fn, L, T = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 rss = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0   # bytes on macOS
 base = rss()
-m = ct.models.MLModel(path, function_name=fn, compute_units=ct.ComputeUnit.CPU_AND_NE)
+m = ct.models.CompiledMLModel(path, compute_units=ct.ComputeUnit.CPU_AND_NE, function_name=fn)
 loaded = rss()
 x = {"mix": np.random.rand(1, 2, L).astype(np.float32) * 0.2, "spec": np.random.rand(1, 4, 2048, T).astype(np.float32)}
 m.predict(x)
@@ -248,23 +249,44 @@ def main():
     ct.utils.save_multifunction(desc, a.out)
     print("multifunction package: %.1f MB" % (sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(a.out) for f in fs) / 1e6))
 
+    # Compile here, as Xcode does for iOS apps, and ship the .mlmodelc: on an
+    # iPhone (iOS 26), loading a function of a package compiled on the phone
+    # failed with "functionName must be nil unless the model type is ML Program".
+    compiled_dir = "compiled"
+    shutil.rmtree(compiled_dir, ignore_errors=True)
+    os.makedirs(compiled_dir)
+    base_cmd = ["xcrun", "coremlcompiler", "compile", a.out, compiled_dir]
+    r = subprocess.run(base_cmd + ["--platform", "ios", "--deployment-target", "18.0"], capture_output=True, text=True)
+    if r.returncode != 0:
+        print("coremlcompiler with --platform ios failed (%s), retrying without" % (r.stderr or r.stdout).strip()[-300:])
+        shutil.rmtree(compiled_dir, ignore_errors=True)
+        os.makedirs(compiled_dir)
+        r = subprocess.run(base_cmd, capture_output=True, text=True)
+    print(r.stdout, r.stderr)
+    if r.returncode != 0:
+        sys.exit("coremlcompiler failed")
+    compiled = os.path.join(compiled_dir, os.path.splitext(os.path.basename(a.out))[0] + ".mlmodelc")
+    if not os.path.isdir(compiled):
+        sys.exit("no %s after compiling: %s" % (compiled, os.listdir(compiled_dir)))
+    print("::notice title=compiled::%s %.1f MB" % (os.path.basename(compiled),
+          sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(compiled) for f in fs) / 1e6))
+
     if sys.platform == "darwin":
         for f in functions:
-            r = subprocess.run([sys.executable, "-c", MEASURE, a.out, f["name"], str(f["samples"]), str(f["frames"])],
+            r = subprocess.run([sys.executable, "-c", MEASURE, compiled, f["name"], str(f["samples"]), str(f["frames"])],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                print("::warning title=%s runner memory::measurement failed: %s" % (f["name"], (r.stderr or "")[-500:].replace("\n", " ")))
-                continue
+                sys.exit("%s: loading the compiled model by function name failed: %s" % (f["name"], (r.stderr or "")[-1500:]))
             load_mb, run_mb, secs = r.stdout.split()[-3:]
             f["runner_load_mb"], f["runner_run_mb"] = float(load_mb), float(run_mb)
             print("::notice title=%s on the runner (Mac CPU)::%s s window: load +%s MB, load + run +%s MB, %s s per run" % (
                 f["name"], f["seconds"], load_mb, run_mb, secs))
 
-    archive = a.out + ".aar"
-    subprocess.run(["aa", "archive", "-d", a.out, "-o", archive], check=True)
+    archive = "DeezitDemucs.mlmodelc.aar"
+    subprocess.run(["aa", "archive", "-d", compiled, "-o", archive], check=True)
     digest = hashlib.sha256(open(archive, "rb").read()).hexdigest()
     meta = {
-        "model": "htdemucs_ft-vocals", "signature": SIG, "file": os.path.basename(archive), "format": "aar-mlpackage-multifunction",
+        "model": "htdemucs_ft-vocals", "signature": SIG, "file": os.path.basename(archive), "format": "aar-mlmodelc-multifunction", "default_function": functions[0]["name"],
         "n_fft": model.nfft, "hop": model.hop_length, "sample_rate": model.samplerate,
         "functions": functions,
         "bytes": os.path.getsize(archive), "sha256": digest,
