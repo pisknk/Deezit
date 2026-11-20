@@ -215,7 +215,22 @@ static void resolveAlbum(NSString *akey, NSString *tkey, NSString *title, NSStri
 
 // Deezer's info, plus the animated cover when there is one for this album
 // (or, for an album without one, for this song's other release).
+// Deezer updates now-playing by reading nowPlayingInfo back, changing the
+// track fields and setting it again, so the copy it sends still carries the
+// previous song's animated cover. Every update loses our keys here; the
+// current song's cover (if ready) is added back afterwards.
+static NSDictionary *withoutAnimatedArtwork(NSDictionary *info) {
+    if (![info isKindOfClass:[NSDictionary class]]) return info;
+    BOOL has3x4 = sKey3x4 && info[sKey3x4], has1x1 = sKey1x1 && info[sKey1x1];
+    if (!has3x4 && !has1x1) return info;
+    NSMutableDictionary *clean = [info mutableCopy];
+    if (has3x4) [clean removeObjectForKey:sKey3x4];
+    if (has1x1) [clean removeObjectForKey:sKey1x1];
+    return clean;
+}
+
 static NSDictionary *withArtwork(MPNowPlayingInfoCenter *center, NSDictionary *info) {
+    info = withoutAnimatedArtwork(info);
     if (![info isKindOfClass:[NSDictionary class]] || !info.count) {
         @synchronized (sLock) { sLastInfo = nil; sCurrentKey = nil; sCurrentTrackKey = nil; }
         return info;
@@ -279,7 +294,8 @@ static BOOL active(void) {
 
 - (void)setNowPlayingInfo:(NSDictionary *)info {
     if (!active()) {
-        %orig;
+        // switched off / Low Power Mode: make sure no cover of ours lingers
+        %orig(withoutAnimatedArtwork(info));
         return;
     }
     %orig(withArtwork(self, info));
