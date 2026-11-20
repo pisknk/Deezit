@@ -22,7 +22,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionReverb,      // controls
     DZSectionReset,       // controls
     DZSectionModel,       // settings: Sing model download
-    DZSectionDemucs,      // settings: experimental HT-Demucs model + benchmark
+    DZSectionDemucs,      // settings: experimental model lab (MDX-Net) + benchmark
     DZSectionLockScreen,  // settings
     DZSectionCount,
 };
@@ -225,7 +225,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionSpeed: return @"Speed";
         case DZSectionReverb: return @"Reverb";
         case DZSectionModel: return @"Sing";
-        case DZSectionDemucs: return @"HT-Demucs (experimental)";
+        case DZSectionDemucs: return @"Model lab (experimental)";
         case DZSectionLockScreen: return @"Lock Screen";
     }
     return nil;
@@ -252,10 +252,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
                    @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
                    @"Turn it up or down with Playback Controls → Sing → Vocals.";
         case DZSectionDemucs:
-            return @"A bigger, cleaner vocal model (Demucs htdemucs_ft vocals, Meta, MIT licence; about 160 MB: one "
-                   @"model for 2.6 s windows, one for 3.9 s). For now it is only benchmarked: it times the model on this iPhone and "
-                   @"shows how much runs on the Neural Engine, which Sing needs to keep working with the screen locked. Playback keeps "
-                   @"using Spleeter. Shortest window first; a longer one is skipped when there isn't enough memory for it. Takes a minute or two. "
+            return @"Candidate Sing models, benchmarked on this iPhone: UVR MDX-Net vocal models 9482 (by Anjok07) and Voc FT "
+                   @"(by Kimberley Jensen), MIT licence, Core ML conversion by gyoom; about 50 MB for both. The benchmark times each "
+                   @"one and shows how much runs on the Neural Engine, which Sing needs to keep working with the screen locked. "
+                   @"Playback keeps using Spleeter. A bigger model is skipped when there isn't enough memory for it. Takes a minute or two. "
                    @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";
         case DZSectionLockScreen:
             return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
@@ -392,7 +392,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             if (ip.row == 0) {
                 cfg = [UIListContentConfiguration valueCellConfiguration];
-                cfg.text = @"HT-Demucs";
+                cfg.text = @"MDX-Net";
                 cfg.secondaryText = DZDemucsStatusText();
                 cfg.image = [UIImage systemImageNamed:@"waveform.badge.magnifyingglass"];
             } else if (ip.row == 1) {

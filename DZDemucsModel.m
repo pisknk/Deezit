@@ -7,12 +7,16 @@
 
 NSString *const DZDemucsChangedNotification = @"DZDemucsChangedNotification";
 
-// One plain Core ML model (iOS 16 mlprogram, compiled on the phone) per window
-// length, as the release's JSON lists them. The phone refused the iOS 18
-// multifunction package that held all windows in one.
-static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-htdemucs-v4/";
-static NSString *const kDZMeta = @"DeezitDemucs.json";
+// Model lab: candidate Sing models, benchmarked on the phone. One plain Core ML
+// package (iOS 16 mlprogram, compiled on the phone) per model, as the release's
+// JSON lists them. Now: the UVR MDX-Net vocal models (9482, Voc FT; MIT),
+// published by .github/workflows/vocal-model-mdx.yml. Before: HT-Demucs
+// (vocal-model-htdemucs-v4), which ran CPU-only on an iPhone 13 (1.1 s per
+// 2.6 s window, 1.3 GB), too slow for live Sing.
+static NSString *const kDZRelease = @"https://github.com/pisknk/Deezit/releases/download/vocal-model-mdx-v1/";
+static NSString *const kDZMeta = @"DeezitMDX.json";
 static NSString *const kDZFormat = @"aar-mlpackage-per-window";
+static NSString *const kDZModelID = @"uvr-mdx-net";
 
 static NSObject *sLock;
 static DZDemucsState sState;
@@ -50,7 +54,7 @@ static void notify(void) {
 // shortest first; empty if it isn't this format.
 static NSArray<NSDictionary *> *windowsIn(NSData *data) {
     NSDictionary *meta = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![meta isKindOfClass:[NSDictionary class]] || ![meta[@"format"] isEqual:kDZFormat]) return @[];
+    if (![meta isKindOfClass:[NSDictionary class]] || ![meta[@"format"] isEqual:kDZFormat] || ![meta[@"model"] isEqual:kDZModelID]) return @[];
     NSArray *list = meta[@"functions"];
     if (![list isKindOfClass:[NSArray class]]) return @[];
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
@@ -60,7 +64,12 @@ static NSArray<NSDictionary *> *windowsIn(NSData *data) {
             && [f[@"file"] hasSuffix:@".aar"])
             [out addObject:f];
     }
-    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"seconds"] compare:b[@"seconds"]]; }];
+    // smallest first: shorter window, then fewer frequency bins
+    [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult r = [a[@"seconds"] compare:b[@"seconds"]];
+        if (r != NSOrderedSame) return r;
+        return [@([a[@"bins"] doubleValue]) compare:@([b[@"bins"] doubleValue])];
+    }];
     return out;
 }
 
@@ -89,8 +98,11 @@ static void setup(void) {
     dispatch_once(&once, ^{
         sLock = [NSObject new];
         BOOL have = installed();
-        if (!have && [NSFileManager.defaultManager fileExistsAtPath:[dir() URLByAppendingPathComponent:@"DeezitDemucs.mlmodelc"].path]) {
-            // an older download (one 7.8 s model, or the multifunction one): replaced
+        BOOL leftovers = NO;
+        for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir().path error:nil] ?: @[])
+            if ([f hasPrefix:@"DeezitDemucs"]) leftovers = YES;
+        if (!have && leftovers) {
+            // an earlier lab model (HT-Demucs) or an unfinished download: removed
             removeModels();
             [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
         }
@@ -127,7 +139,7 @@ NSString *DZDemucsStatusText(void) {
     setup();
     @synchronized (sLock) {
         switch (sState) {
-            case DZDemucsNotInstalled: return @"Not downloaded (about 160 MB)";
+            case DZDemucsNotInstalled: return @"Not downloaded (about 50 MB)";
             case DZDemucsDownloading: return [NSString stringWithFormat:@"Downloading… %d%%", (int)lround(sProgress * 100)];
             case DZDemucsPreparing: return [NSString stringWithFormat:@"Preparing for this iPhone… %d%%", (int)lround(sProgress * 100)];
             case DZDemucsReady: return [NSString stringWithFormat:@"Ready (%.0f MB)", installedSize() / 1e6];
@@ -295,19 +307,28 @@ static MLModelConfiguration *config(void) {
 // Inputs with realistic sizes and values (timing doesn't depend on content).
 static MLDictionaryFeatureProvider *inputs(MLModel *model, NSString **error) {
     NSMutableDictionary *values = [NSMutableDictionary dictionary];
-    for (NSString *name in @[@"mix", @"spec"]) {
-        MLFeatureDescription *d = model.modelDescription.inputDescriptionsByName[name];
-        NSArray<NSNumber *> *shape = d.multiArrayConstraint.shape;
-        if (!shape.count) { *error = [NSString stringWithFormat:@"model has no input \"%@\"", name]; return nil; }
+    NSDictionary<NSString *, MLFeatureDescription *> *all = model.modelDescription.inputDescriptionsByName;
+    if (!all.count) { *error = @"model has no inputs"; return nil; }
+    for (NSString *name in all) {
+        MLMultiArrayConstraint *c = all[name].multiArrayConstraint;
+        if (!c.shape.count) { *error = [NSString stringWithFormat:@"input \"%@\" isn't an array", name]; return nil; }
+        BOOL half = NO;
+        if (@available(iOS 16.0, *)) half = c.dataType == MLMultiArrayDataTypeFloat16;
         NSError *err = nil;
-        MLMultiArray *a = [[MLMultiArray alloc] initWithShape:shape dataType:MLMultiArrayDataTypeFloat32 error:&err];
+        MLMultiArray *a = nil;
+        if (@available(iOS 16.0, *)) {
+            a = [[MLMultiArray alloc] initWithShape:c.shape dataType:half ? MLMultiArrayDataTypeFloat16 : MLMultiArrayDataTypeFloat32 error:&err];
+        } else {
+            a = [[MLMultiArray alloc] initWithShape:c.shape dataType:MLMultiArrayDataTypeFloat32 error:&err];
+        }
         if (!a) { *error = err.localizedDescription; return nil; }
-        float *p = (float *)a.dataPointer;
         float scale = [name isEqualToString:@"mix"] ? 0.2f : 0.5f;
         uint32_t seed = 12345;
         for (NSInteger i = 0; i < a.count; i++) {
             seed = seed * 1664525u + 1013904223u;
-            p[i] = ((float)(seed >> 8) / 16777216.0f * 2 - 1) * scale;
+            float v = ((float)(seed >> 8) / 16777216.0f * 2 - 1) * scale;
+            if (half) ((__fp16 *)a.dataPointer)[i] = (__fp16)v;
+            else ((float *)a.dataPointer)[i] = v;
         }
         values[name] = [MLFeatureValue featureValueWithMultiArray:a];
     }
@@ -449,7 +470,7 @@ static void installExceptionNote(void) {
 static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failure) {
     NSString *name = fn[@"name"];
     double seconds = [fn[@"seconds"] doubleValue];
-    NSString *label = [NSString stringWithFormat:@"%.1f s window", seconds];
+    NSString *label = [fn[@"label"] isKindOfClass:[NSString class]] ? fn[@"label"] : [NSString stringWithFormat:@"%.1f s window", seconds];
     double before = freeMB();
     @synchronized (sLock) { sStepMinFreeMB = before; }
     // No pool around the whole function (an out-parameter set inside it would
@@ -493,12 +514,14 @@ static NSString *benchWindow(NSDictionary *fn, double *usedMB, NSString **failur
         double lowest;
         @synchronized (sLock) { lowest = sStepMinFreeMB; }
         *usedMB = before - lowest;
-        // Live, windows would overlap by half: one window per half window of
-        // new audio. Using under 40% of that time leaves room for the rest.
-        double share = median / (seconds * 500);
+        // Live, each run moves the window on by step_fraction of it (half for
+        // HT-Demucs, a quarter for MDX-Net's 5.9 s): that much new audio is the
+        // time a run may take. Using under 40% of it leaves room for the rest.
+        double step = [fn[@"step_fraction"] isKindOfClass:[NSNumber class]] ? [fn[@"step_fraction"] doubleValue] : 0.5;
+        double share = median / (seconds * 1000 * step);
         NSString *verdict = median < 0 ? @"no timing" :
             share <= 0.4 ? @"fast enough for live Sing" : share <= 0.8 ? @"borderline for live Sing" : @"too slow for live Sing";
-        return [NSString stringWithFormat:@"%@: %.0f ms per window (median of %lu), %.0f%% of the time live use allows - %@\n"
+        return [NSString stringWithFormat:@"%@: %.0f ms per run (median of %lu), %.0f%% of the time live use allows - %@\n"
                 @"   memory: %.0f MB to load, %.0f MB at most · load %.1f s, first run %.1f s",
                 label, median, (unsigned long)runs.count, share * 100, verdict,
                 before - afterLoad, *usedMB, loadS, firstS];
@@ -529,19 +552,22 @@ void DZDemucsRunBenchmark(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableArray<NSString *> *lines = [NSMutableArray array];
         NSArray<NSDictionary *> *fns = functionsList();
-        NSString *smallest = fns.firstObject[@"name"];
         {
             if (!fns.count) [lines addObject:@"the model's window list is missing: delete and download it again"];
-            double prevUsed = 0, prevSeconds = 0;
+            double prevUsed = 0, prevSeconds = 0, prevBins = 1;
+            NSMutableArray<NSString *> *ran = [NSMutableArray array];
             for (NSDictionary *fn in fns) {
                 double seconds = [fn[@"seconds"] doubleValue];
+                double bins = [fn[@"bins"] doubleValue] > 0 ? [fn[@"bins"] doubleValue] : 1;
                 if (prevSeconds > 0) {
-                    // attention memory grows with the square of the window; keep 300 MB spare
-                    double need = prevUsed * (seconds / prevSeconds) * (seconds / prevSeconds);
+                    // memory grows with the frequency bins, and (attention) with the
+                    // square of the window; keep 300 MB spare
+                    double need = prevUsed * fmax(1, bins / prevBins) * (seconds / prevSeconds) * (seconds / prevSeconds);
                     double free = freeMB();
                     if (free < need + 300) {
-                        NSString *skip = [NSString stringWithFormat:@"%.1f s window: skipped, would need about %.0f MB and %.0f MB is free",
-                                          seconds, need, free];
+                        NSString *name = [fn[@"label"] isKindOfClass:[NSString class]] ? fn[@"label"] : [NSString stringWithFormat:@"%.1f s window", seconds];
+                        NSString *skip = [NSString stringWithFormat:@"%@: skipped, would need about %.0f MB and %.0f MB is free",
+                                          name, need, free];
                         [lines addObject:skip];
                         addDone(skip);
                         break;
@@ -555,12 +581,14 @@ void DZDemucsRunBenchmark(void) {
                 addDone(line);
                 prevUsed = used;
                 prevSeconds = seconds;
+                prevBins = bins;
+                [ran addObject:fn[@"name"]];
             }
-            // Where each op would run (shortest window). Last: with the 7.8 s
-            // model this step alone got Deezer killed.
-            if (smallest) {
-                step(@"compute plan");
-                [lines addObject:computePlanSummary(smallest)];
+            // Where each op would run, for every model that ran. Last: with
+            // HT-Demucs' 7.8 s model this step alone got Deezer killed.
+            for (NSString *name in ran) {
+                step([@"compute plan " stringByAppendingString:name]);
+                [lines addObject:computePlanSummary(name)];
             }
         }
         dispatch_source_cancel(sampler);
