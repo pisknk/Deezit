@@ -21,14 +21,14 @@ which Core ML can't take) stay on the phone, where Deezit already computes a
 Window length. Demucs runs this model on 7.8 s windows, but on an iPhone 13
 loading that took ~2.2 GB and got Deezer killed: the cross-transformer attends
 over every frequency x time position of the window, so its memory grows with
-the square of the window. The package therefore holds one Core ML function per
-window length (2.6, 3.9, 7.8 s; mlprogram multifunction, iOS 18, weights
-shared), and the phone's benchmark tries them shortest first. Shorter windows
-are not how Demucs was trained, so their quality still has to be judged.
+the square of the window. So there is one Core ML model per shorter window
+(2.6 and 3.9 s; separate packages, since the phone refused a multifunction
+one), and the phone's benchmark tries them shortest first. Shorter windows are
+not how Demucs was trained, so their quality still has to be judged.
 
-Checks: the split reproduces the full model exactly (at 7.8 s, the length the
-full model runs at), and Core ML (fp16) stays close to PyTorch for every
-window. The runner's memory for loading + running each function is reported
+Checks: Core ML (fp16) stays close to PyTorch for every window (the exact
+split check needs 7.8 s, the only length the full model runs at; it passed
+there in earlier runs). The runner's memory for loading + running each function is reported
 (Mac CPU, so only a rough guide for the phone).
 """
 
@@ -46,7 +46,7 @@ import numpy as np
 import torch
 
 SIG = "04573f0d"            # htdemucs_ft's vocals model (row [0, 0, 0, 1] of its bag weights)
-WINDOWS = (("w26", 2.6), ("w39", 3.9), ("w78", None))   # None: the training segment (7.8 s)
+WINDOWS = (("w26", 2.6), ("w39", 3.9))   # 7.8 s (the training segment) needed ~2.2 GB on an iPhone 13
 
 
 def load_vocals_model():
@@ -189,10 +189,13 @@ def convert_window(model, ct, name, seconds):
         convert_to="mlprogram",
         compute_precision=ct.precision.FLOAT16,
         compute_units=ct.ComputeUnit.CPU_AND_NE,
-        minimum_deployment_target=ct.target.iOS18,    # multifunction; attention as one SDPA op
+        # iOS 16 like the first HT-Demucs model, which the phone loaded. (iOS 18
+        # multifunction packages were refused on the phone: "This MLModel doesn't
+        # support the multi-function description syntax".)
+        minimum_deployment_target=ct.target.iOS16,
     )
     print("converted in %.0f s" % (time.time() - t0))
-    path = name + ".mlpackage"
+    path = "DeezitDemucs-%s.mlpackage" % name
     shutil.rmtree(path, ignore_errors=True)
     ml.save(path)
 
@@ -210,28 +213,27 @@ def convert_window(model, ct, name, seconds):
         if err_db > -26:
             sys.exit("%s: Core ML rebuilt vocals differ from PyTorch by %.1f dB of the mix (need <= -26 dB)" % (name, err_db))
     del ml
-    return {"name": name, "seconds": round(L / model.samplerate, 3), "samples": L, "frames": T, "bins": F}
+    return {"name": name, "seconds": round(L / model.samplerate, 3), "samples": L, "frames": T, "bins": F, "path": path}
 
 
-# Loads one function of the compiled model (what the phone gets) and runs it.
-MEASURE = r'''
+# Loads one window's model the way the phone does (from the package) and runs it.
+MEASURE = r"""
 import resource, sys, time, numpy as np, coremltools as ct
-path, fn, L, T = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+path, L, T = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 rss = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0   # bytes on macOS
 base = rss()
-m = ct.models.CompiledMLModel(path, compute_units=ct.ComputeUnit.CPU_AND_NE, function_name=fn)
+m = ct.models.MLModel(path, compute_units=ct.ComputeUnit.CPU_AND_NE)
 loaded = rss()
 x = {"mix": np.random.rand(1, 2, L).astype(np.float32) * 0.2, "spec": np.random.rand(1, 4, 2048, T).astype(np.float32)}
 m.predict(x)
 t0 = time.time(); m.predict(x); dt = time.time() - t0
 print("%.0f %.0f %.2f" % (loaded - base, rss() - base, dt))
-'''
+"""
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="DeezitDemucs.mlpackage")
-    a = ap.parse_args()
+    ap.parse_args()
 
     # nn.MultiheadAttention's fused fast path doesn't convert; use the plain ops
     if hasattr(torch.backends, "mha"):
@@ -239,63 +241,35 @@ def main():
 
     import coremltools as ct
     model = load_vocals_model()
-    functions = [convert_window(model, ct, name, seconds) for name, seconds in WINDOWS]
-
-    desc = ct.utils.MultiFunctionDescriptor()
-    for f in functions:
-        desc.add_function(f["name"] + ".mlpackage", src_function_name="main", target_function_name=f["name"])
-    desc.default_function_name = functions[0]["name"]
-    shutil.rmtree(a.out, ignore_errors=True)
-    ct.utils.save_multifunction(desc, a.out)
-    print("multifunction package: %.1f MB" % (sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(a.out) for f in fs) / 1e6))
-
-    # Compile here, as Xcode does for iOS apps, and ship the .mlmodelc: on an
-    # iPhone (iOS 26), loading a function of a package compiled on the phone
-    # failed with "functionName must be nil unless the model type is ML Program".
-    compiled_dir = "compiled"
-    shutil.rmtree(compiled_dir, ignore_errors=True)
-    os.makedirs(compiled_dir)
-    base_cmd = ["xcrun", "coremlcompiler", "compile", a.out, compiled_dir]
-    r = subprocess.run(base_cmd + ["--platform", "ios", "--deployment-target", "18.0"], capture_output=True, text=True)
-    if r.returncode != 0:
-        print("coremlcompiler with --platform ios failed (%s), retrying without" % (r.stderr or r.stdout).strip()[-300:])
-        shutil.rmtree(compiled_dir, ignore_errors=True)
-        os.makedirs(compiled_dir)
-        r = subprocess.run(base_cmd, capture_output=True, text=True)
-    print(r.stdout, r.stderr)
-    if r.returncode != 0:
-        sys.exit("coremlcompiler failed")
-    compiled = os.path.join(compiled_dir, os.path.splitext(os.path.basename(a.out))[0] + ".mlmodelc")
-    if not os.path.isdir(compiled):
-        sys.exit("no %s after compiling: %s" % (compiled, os.listdir(compiled_dir)))
-    print("::notice title=compiled::%s %.1f MB" % (os.path.basename(compiled),
-          sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(compiled) for f in fs) / 1e6))
-
-    if sys.platform == "darwin":
-        for f in functions:
-            r = subprocess.run([sys.executable, "-c", MEASURE, compiled, f["name"], str(f["samples"]), str(f["frames"])],
+    windows = []
+    for name, seconds in WINDOWS:
+        w = convert_window(model, ct, name, seconds)
+        package = w.pop("path")
+        if sys.platform == "darwin":
+            r = subprocess.run([sys.executable, "-c", MEASURE, package, str(w["samples"]), str(w["frames"])],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                sys.exit("%s: loading the compiled model by function name failed: %s" % (f["name"], (r.stderr or "")[-1500:]))
+                sys.exit("%s: loading the saved model failed: %s" % (name, (r.stderr or "")[-1500:]))
             load_mb, run_mb, secs = r.stdout.split()[-3:]
-            f["runner_load_mb"], f["runner_run_mb"] = float(load_mb), float(run_mb)
+            w["runner_load_mb"], w["runner_run_mb"] = float(load_mb), float(run_mb)
             print("::notice title=%s on the runner (Mac CPU)::%s s window: load +%s MB, load + run +%s MB, %s s per run" % (
-                f["name"], f["seconds"], load_mb, run_mb, secs))
+                name, w["seconds"], load_mb, run_mb, secs))
+        archive = package + ".aar"
+        subprocess.run(["aa", "archive", "-d", package, "-o", archive], check=True)
+        w["file"] = archive
+        w["bytes"] = os.path.getsize(archive)
+        w["sha256"] = hashlib.sha256(open(archive, "rb").read()).hexdigest()
+        print("::notice title=%s model::%s %.1f MB" % (name, archive, w["bytes"] / 1e6))
+        windows.append(w)
 
-    archive = "DeezitDemucs.mlmodelc.aar"
-    subprocess.run(["aa", "archive", "-d", compiled, "-o", archive], check=True)
-    digest = hashlib.sha256(open(archive, "rb").read()).hexdigest()
     meta = {
-        "model": "htdemucs_ft-vocals", "signature": SIG, "file": os.path.basename(archive), "format": "aar-mlmodelc-multifunction", "default_function": functions[0]["name"],
+        "model": "htdemucs_ft-vocals", "signature": SIG, "format": "aar-mlpackage-per-window",
         "n_fft": model.nfft, "hop": model.hop_length, "sample_rate": model.samplerate,
-        "functions": functions,
-        "bytes": os.path.getsize(archive), "sha256": digest,
+        "functions": windows,
+        "bytes": sum(w["bytes"] for w in windows),
     }
     with open("DeezitDemucs.json", "w") as fh:
         json.dump(meta, fh, indent=1)
-    print("wrote %s (%.1f MB), sha256 %s" % (archive, os.path.getsize(archive) / 1e6, digest))
-    print("::notice title=model::%s %.1f MB, windows %s" % (
-        os.path.basename(archive), os.path.getsize(archive) / 1e6, ", ".join("%s s" % f["seconds"] for f in functions)))
 
 
 if __name__ == "__main__":
