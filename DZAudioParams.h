@@ -14,6 +14,8 @@ typedef struct {
                        // (independent of `enabled`; 0 before prefs load)
     float backingKeep; // 0 = backing vocals go with the lead ... 1 = only the
                        // centred lead is removed, side-panned backing vocals stay
+    int   singStrength;// 0 Gentle, 1 Normal, 2 Strong: how sure the model must be
+                       // before a time-frequency cell counts as voice
 } DZAudioParams;
 
 #ifdef __cplusplus

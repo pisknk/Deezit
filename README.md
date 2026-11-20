@@ -79,8 +79,11 @@ Then sideload `Deezer-Deezit.ipa` as usual.
    prepares it for the phone's Neural Engine.
 2. **Playback Controls → Sing → Vocals** sets how much singing is left
    (100% = untouched); **Backing vocals** keeps the harmonies that are
-   spread left / right and removes only the centred lead. Changes are heard
-   after about 3 seconds.
+   spread left / right and removes only the centred lead; **Strength**
+   (Gentle / Normal / Strong) sets how sure the model must be before a sound
+   counts as voice, so Gentle and Normal leave instruments it only
+   half-mistakes for singing (violins, claps, synth leads) alone. Changes
+   are heard after about 3 seconds.
 
 The model is **Spleeter 2-stems** (Deezer Research, MIT licence), converted
 by `tools/vocal_model/convert.py` in `.github/workflows/vocal-model.yml`: the

@@ -18,6 +18,7 @@ extern NSString *const kDZPreset;       // NSString preset identifier, "custom" 
 extern NSString *const kDZLockArtwork;  // BOOL  animated album covers on the lock screen (iOS 26+)
 extern NSString *const kDZVocals;       // float 0 ... 1 vocal level ("Sing"): 1 = untouched, 0 = vocals removed
 extern NSString *const kDZBackingVocals; // float 0 ... 1 how much of the side-panned (backing) vocals to keep
+extern NSString *const kDZSingStrength;  // int 0 Gentle / 1 Normal / 2 Strong
 extern NSString *const kDZAudioHook;    // BOOL  kill switch: NO = never touch Deezer's audio graph
                                         //       (read at launch, set from the debug panel)
 

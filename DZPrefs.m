@@ -15,6 +15,7 @@ NSString *const kDZAudioHook = @"audioHook";
 NSString *const kDZLockArtwork = @"lockArtwork";
 NSString *const kDZVocals = @"vocals";
 NSString *const kDZBackingVocals = @"backingVocals";
+NSString *const kDZSingStrength = @"singStrength";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -29,6 +30,7 @@ static _Atomic float sReverbRoom;
 static _Atomic float sReverbDamp;
 static _Atomic float sVocalCut;
 static _Atomic float sBackingKeep;
+static _Atomic int sSingStrength = 1;
 
 static NSDictionary *defaultValues(void) {
     return @{
@@ -42,6 +44,7 @@ static NSDictionary *defaultValues(void) {
         kDZLockArtwork: @YES,
         kDZVocals: @1.0f,
         kDZBackingVocals: @0.0f,
+        kDZSingStrength: @1,
     };
 }
 
@@ -55,6 +58,8 @@ static void refreshAtomics(void) {
     atomic_store(&sReverbDamp, clampf([sDefaults floatForKey:kDZReverbDamp], 0, 1));
     atomic_store(&sVocalCut, 1.0f - clampf([sDefaults floatForKey:kDZVocals], 0, 1));
     atomic_store(&sBackingKeep, clampf([sDefaults floatForKey:kDZBackingVocals], 0, 1));
+    NSInteger strength = [sDefaults integerForKey:kDZSingStrength];
+    atomic_store(&sSingStrength, (int)(strength < 0 ? 0 : strength > 2 ? 2 : strength));
 }
 
 static void postChanged(void) {
@@ -100,7 +105,7 @@ void DZPrefSetMany(NSDictionary<NSString *, id> *values) {
 
 void DZPrefsResetAudio(void) {
     DZPrefsBootstrap();
-    for (NSString *k in @[kDZSpeed, kDZReverbMix, kDZReverbRoom, kDZReverbDamp, kDZPreset, kDZVocals, kDZBackingVocals]) {
+    for (NSString *k in @[kDZSpeed, kDZReverbMix, kDZReverbRoom, kDZReverbDamp, kDZPreset, kDZVocals, kDZBackingVocals, kDZSingStrength]) {
         [sDefaults removeObjectForKey:k];
     }
     postChanged();
@@ -115,6 +120,7 @@ DZAudioParams DZPrefsAudioParams(void) {
     p.reverbDamp = atomic_load_explicit(&sReverbDamp, memory_order_relaxed);
     p.vocalCut = atomic_load_explicit(&sVocalCut, memory_order_relaxed);
     p.backingKeep = atomic_load_explicit(&sBackingKeep, memory_order_relaxed);
+    p.singStrength = atomic_load_explicit(&sSingStrength, memory_order_relaxed);
     if (p.speed <= 0) p.speed = 1.0f; // never bootstrapped yet
     return p;
 }

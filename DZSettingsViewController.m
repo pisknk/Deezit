@@ -189,7 +189,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
-        case DZSectionSing: return DZVocalModelGetState() == DZVocalModelReady ? 2 : 1;   // Vocals, Backing vocals
+        case DZSectionSing: return DZVocalModelGetState() == DZVocalModelReady ? 3 : 1;   // Vocals, Backing vocals, Strength
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
@@ -221,8 +221,9 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionSing:
             return DZVocalModelGetState() == DZVocalModelReady
                 ? @"Takes the singing out with an on-device AI model. Backing vocals keeps the harmonies spread left and right "
-                  @"and removes only the centred lead (a lead that is itself wide or reverb-heavy may leave a trace). "
-                  @"Changes are heard after about 3 seconds."
+                  @"and removes only the centred lead. Strength: Gentle only removes what the model is sure is voice "
+                  @"(instruments like violins and claps stay, a little voice may remain); Strong removes more, instruments "
+                  @"included. Changes are heard after about 3 seconds."
                 : @"Needs the vocal model: open Deezit Settings (three-finger hold) → Sing → Download.";
         case DZSectionSpeed:
             return @"Pitch follows speed, like a turntable: slower is deeper.";
@@ -270,6 +271,18 @@ typedef NS_ENUM(NSInteger, DZSection) {
                 cfg.secondaryTextProperties.color = UIColor.secondaryLabelColor;
                 cfg.image = [UIImage systemImageNamed:@"music.mic"];
                 c.contentConfiguration = cfg;
+                return c;
+            }
+            if (ip.row == 2) {
+                UITableViewCell *c = [self basicCell:tv at:ip];
+                UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+                cfg.text = @"Strength";
+                c.contentConfiguration = cfg;
+                UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Gentle", @"Normal", @"Strong"]];
+                seg.selectedSegmentIndex = MIN(MAX((NSInteger)lroundf(DZPrefFloat(kDZSingStrength)), 0), 2);
+                [seg addTarget:self action:@selector(strengthChanged:) forControlEvents:UIControlEventValueChanged];
+                [seg sizeToFit];
+                c.accessoryView = seg;
                 return c;
             }
             if (ip.row == 1) {
@@ -384,6 +397,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 - (void)toggleEnabled:(UISwitch *)sw {
     DZPrefSet(kDZEnabled, @(sw.on));
+}
+
+- (void)strengthChanged:(UISegmentedControl *)seg {
+    DZPrefSet(kDZSingStrength, @(seg.selectedSegmentIndex));
 }
 
 - (void)toggleLockArtwork:(UISwitch *)sw {

@@ -246,6 +246,24 @@ static inline void unmix(float *l, float *r, float mL, float mR, float cutLead, 
     *r -= cutLead * mid - cutSide * side;
 }
 
+// Strength: how sure the model must be before a cell counts as voice. Below
+// `lo` the cell is left alone, above `hi` it is fully voice, linear between.
+// Instruments the model only half-mistakes for voice (violins, claps, synth
+// leads) sit in the low range and survive Gentle / Normal. `hiBand` scales
+// the mask used above the model's ~11 kHz range (the singer's "s" / "t", but
+// also claps and cymbals).
+typedef struct { float lo, hi, hiBand; } DZStrength;
+static const DZStrength kDZStrengths[3] = {
+    { 0.45f, 0.85f, 0.0f },     // Gentle
+    { 0.25f, 0.80f, 0.5f },     // Normal
+    { 0.00f, 1.00f, 1.0f },     // Strong (the model's mask as is)
+};
+
+static inline float shapeMask(float m, const DZStrength *k) {
+    float v = (m - k->lo) / (k->hi - k->lo);
+    return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+
 static void runCompute(DZSepNode *s, uint64_t gen) {
     const int span = kSpan;
     for (;;) {
@@ -270,6 +288,7 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
 
         DZAudioParams params = DZPrefsAudioParams();
         float cut = params.vocalCut, backing = params.backingKeep;
+        const DZStrength *strength = &kDZStrengths[params.singStrength < 0 ? 0 : params.singStrength > 2 ? 2 : params.singStrength];
         MLModel *model = DZVocalModelGet();
         if (!model) {
             os_unfair_lock_lock(&s->lock);
@@ -340,15 +359,21 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
             // above the model's range (~11 kHz up): its mean mask over ~8.3-11 kHz,
             // so the singer's "s" / "t" go with the voice
             float hiL = 0, hiR = 0;
-            for (int k = kHiFrom; k < kBins; k++) { hiL += maskAt(&view, 0, t, k); hiR += maskAt(&view, 1, t, k); }
-            hiL /= (kBins - kHiFrom);
-            hiR /= (kBins - kHiFrom);
+            if (strength->hiBand > 0) {
+                for (int k = kHiFrom; k < kBins; k++) {
+                    hiL += shapeMask(maskAt(&view, 0, t, k), strength);
+                    hiR += shapeMask(maskAt(&view, 1, t, k), strength);
+                }
+                hiL *= strength->hiBand / (kBins - kHiFrom);
+                hiR *= strength->hiBand / (kBins - kHiFrom);
+            }
 
-            unmix(&reL[0], &reR[0], maskAt(&view, 0, t, 0), maskAt(&view, 1, t, 0), cutLead, cutSide);   // DC
+            unmix(&reL[0], &reR[0], shapeMask(maskAt(&view, 0, t, 0), strength),
+                  shapeMask(maskAt(&view, 1, t, 0), strength), cutLead, cutSide);                       // DC
             unmix(&imL[0], &imR[0], hiL, hiR, cutLead, cutSide);                                       // Nyquist
             for (int k = 1; k < kHalf; k++) {
-                float mL = k < kBins ? maskAt(&view, 0, t, k) : hiL;
-                float mR = k < kBins ? maskAt(&view, 1, t, k) : hiR;
+                float mL = k < kBins ? shapeMask(maskAt(&view, 0, t, k), strength) : hiL;
+                float mR = k < kBins ? shapeMask(maskAt(&view, 1, t, k), strength) : hiR;
                 unmix(&reL[k], &reR[k], mL, mR, cutLead, cutSide);
                 unmix(&imL[k], &imR[k], mL, mR, cutLead, cutSide);
             }
@@ -500,9 +525,10 @@ NSString *DZSingStatus(void) {
     if (!s) return [NSString stringWithFormat:@"sing: vocals %d%%, waiting for playback%@", (int)lroundf((1 - cut) * 100),
                     last ? [@" · " stringByAppendingString:last] : @""];
     os_unfair_lock_lock(&s->lock);
-    NSString *line = [NSString stringWithFormat:@"sing: vocals %d%%, backing %d%% kept · player #%lu %@ · held %.2f s · "
+    NSString *line = [NSString stringWithFormat:@"sing: vocals %d%%, backing %d%% kept, %@ · player #%lu %@ · held %.2f s · "
                       @"player queue %.2f s · %llu blocks · model %.0f ms%@",
-                      (int)lroundf((1 - cut) * 100), (int)lroundf(DZPrefsAudioParams().backingKeep * 100), (unsigned long)s.serial,
+                      (int)lroundf((1 - cut) * 100), (int)lroundf(DZPrefsAudioParams().backingKeep * 100),
+                      @[@"gentle", @"normal", @"strong"][MIN(MAX(DZPrefsAudioParams().singStrength, 0), 2)], (unsigned long)s.serial,
                       s->degraded ? @"PAUSED" : (s->holding ? @"separating" : @"warming up"),
                       s.held.count ? (s->inCount - s.held.firstObject.start) / kSampleRate : 0.0,
                       atomic_load(&s->playerFrames) / kSampleRate, (unsigned long long)s->blocks, s->inferMs,
