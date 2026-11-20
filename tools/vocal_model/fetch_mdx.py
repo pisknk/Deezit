@@ -114,10 +114,64 @@ print("%.0f %.0f %.2f" % (loaded - base, rss() - base, dt))
 """
 
 
-def convert_onnx(ct, onnx_file, dim_f, precision, out):
+def load_torch(onnx_file):
+    """The ONNX graph as PyTorch (onnx2torch), with every 2x2 stride-2
+    convolution rewritten in an equivalent form. On the runner, Core ML (fp32
+    and fp16, CPU and CPU+NE) got those wrong: Conv_16 alone, fed PyTorch's
+    exact input, came out at 20.2 dB (9482) and 12.7 dB (Voc FT).
+      Conv2d k=s=2           == pixel_unshuffle(2) -> 1x1 conv
+      ConvTranspose2d k=s=2  == 1x1 conv -> pixel_shuffle(2)
+    Both are also plain Neural Engine ops."""
     import torch
+    import torch.nn.functional as Fn
     from onnx2torch import convert
-    net = convert(onnx_file).eval()
+
+    class Down(torch.nn.Module):
+        def __init__(self, conv):
+            super().__init__()
+            o, c, kh, kw = conv.weight.shape
+            # pixel_unshuffle orders channels c*4 + i*2 + j, matching W[o, c, i, j]
+            self.pw = torch.nn.Conv2d(c * 4, o, 1, bias=conv.bias is not None)
+            self.pw.weight.data = conv.weight.data.reshape(o, c * 4, 1, 1).clone()
+            if conv.bias is not None:
+                self.pw.bias.data = conv.bias.data.clone()
+
+        def forward(self, x):
+            return self.pw(Fn.pixel_unshuffle(x, 2))
+
+    class Up(torch.nn.Module):
+        def __init__(self, deconv):
+            super().__init__()
+            c, o, kh, kw = deconv.weight.shape
+            # pixel_shuffle reads channel o*4 + i*2 + j into out[o, 2y+i, 2x+j]
+            self.pw = torch.nn.Conv2d(c, o * 4, 1, bias=deconv.bias is not None)
+            self.pw.weight.data = deconv.weight.data.permute(1, 2, 3, 0).reshape(o * 4, c, 1, 1).clone()
+            if deconv.bias is not None:
+                self.pw.bias.data = deconv.bias.data.repeat_interleave(4).clone()
+
+        def forward(self, x):
+            return Fn.pixel_shuffle(self.pw(x), 2)
+
+    gm = convert(onnx_file).eval()
+    swapped = 0
+    for name, mod in list(gm.named_children()):
+        plain = lambda m: (tuple(m.kernel_size) == (2, 2) and tuple(m.stride) == (2, 2) and tuple(m.padding) == (0, 0)
+                           and tuple(m.dilation) == (1, 1) and m.groups == 1)
+        if isinstance(mod, torch.nn.Conv2d) and plain(mod):
+            setattr(gm, name, Down(mod)); swapped += 1
+        elif isinstance(mod, torch.nn.ConvTranspose2d) and plain(mod) and tuple(mod.output_padding) == (0, 0):
+            setattr(gm, name, Up(mod)); swapped += 1
+    print("rewrote %d stride-2 convolutions" % swapped)
+    return gm.eval()
+
+
+def convert_onnx(ct, onnx_file, dim_f, precision, out, ref_x=None, ref_y=None):
+    import torch
+    net = load_torch(onnx_file)
+    if ref_x is not None:
+        with torch.no_grad():
+            y = net(torch.from_numpy(ref_x)).numpy()
+        print("::notice title=rewritten PyTorch vs ONNX::SNR %.1f dB" % snr_db(ref_y, y))
     x = torch.zeros(1, 4, dim_f, FRAMES)
     traced = torch.jit.trace(net, x, check_trace=False)
     ml = ct.convert(traced, convert_to="mlprogram",
@@ -140,7 +194,7 @@ def diagnose(ct, onnx_file, x, ref, label):
     from onnx2torch import convert
     from torch.fx import Interpreter
 
-    gm = convert(onnx_file).eval()
+    gm = load_torch(onnx_file)
     xt = torch.from_numpy(x)
     with torch.no_grad():
         tout = gm(xt).numpy()
@@ -265,7 +319,7 @@ def main():
         print("input |x| max %.1f, rms %.2f" % (np.abs(x).max(), np.sqrt((x ** 2).mean())))
         ref = sess.run(None, {oname: x})[0]
 
-        ours16 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT16, "ours16-" + pkg)
+        ours16 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT16, "ours16-" + pkg, x, ref)
         ours32 = convert_onnx(ct, onnx_file, dim_f, ct.precision.FLOAT32, "ours32-" + pkg)
         results = {}
         for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16), ("ours fp32", ours32)):
@@ -282,7 +336,7 @@ def main():
         # the runner, Core ML fp32 got a lone 2x2 stride-2 Conv2d to only 20.2 dB
         # against PyTorch, fed PyTorch's exact input.)
         chosen = None
-        for tag, path in (("gyoom fp16", pkg), ("ours fp16", ours16)):
+        for tag, path in (("ours fp16", ours16), ("gyoom fp16", pkg)):
             worst = min(results[(tag, "CPU")], results[(tag, "CPU+NE")])
             if worst >= 25:
                 chosen = (tag, path, worst)
