@@ -194,6 +194,42 @@ def diagnose(ct, onnx_file, x, ref, label):
         lines.append("before the first bad one:")
         for r in rows[max(0, i - 3):i]:
             lines.append("%s | %s | %s | %.1f dB" % r)
+    if bad:
+        # the graph from the last good layer to the first bad one, with each module
+        names_all = [n.name for n in gm.graph.nodes]
+        good_before = rows[rows.index(bad[0]) - 1][0] if rows.index(bad[0]) > 0 else names_all[0]
+        a_i, b_i = names_all.index(good_before), names_all.index(bad[0][0])
+        lines.append("graph %s .. %s:" % (good_before, bad[0][0]))
+        for n in list(gm.graph.nodes)[a_i:b_i + 1]:
+            mod = repr(gm.get_submodule(n.target)) if n.op == "call_module" else n.target
+            lines.append("  %s = %s %s(%s)" % (n.name, n.op, str(mod).replace("\n", " ")[:160], ", ".join(str(x) for x in n.args)[:120]))
+        # the first bad layer alone: its PyTorch input -> Core ML fp32 vs PyTorch
+        node = [n for n in gm.graph.nodes if n.name == bad[0][0]][0]
+        if node.op == "call_module" and len(node.args) == 1 and hasattr(node.args[0], "name"):
+            src = node.args[0].name
+            full = {}
+
+            class All(Interpreter):
+                def run_node(self, n):
+                    r = super().run_node(n)
+                    if isinstance(r, torch.Tensor):
+                        full[n.name] = r.detach().clone()
+                    return r
+
+            with torch.no_grad():
+                All(gm).run(xt)
+            if src in full:
+                inp = full[src].contiguous()
+                mod = gm.get_submodule(node.target).eval()
+                with torch.no_grad():
+                    want = mod(inp).numpy()
+                one = ct.convert(torch.jit.trace(mod, inp), convert_to="mlprogram",
+                                 inputs=[ct.TensorType(name="x", shape=tuple(inp.shape), dtype=np.float32)],
+                                 compute_precision=ct.precision.FLOAT32, compute_units=ct.ComputeUnit.CPU_ONLY,
+                                 minimum_deployment_target=ct.target.iOS16)
+                got1 = list(one.predict({"x": inp.numpy()}).values())[0]
+                lines.append("%s alone (its PyTorch input, Core ML fp32): %.1f dB; input %s contiguous-in-graph %s" % (
+                    node.name, snr_db(want, np.asarray(got1).reshape(want.shape)), tuple(inp.shape), full[src].is_contiguous()))
     text = "\n".join(lines)
     print(text)
     print("::notice title=%s diagnosis: Core ML fp32 vs PyTorch per layer::%s" % (label, text.replace("%", "%25").replace("\n", "%0A")))
