@@ -16,6 +16,7 @@ typedef struct {
                        // centred lead is removed, side-panned backing vocals stay
     int   singStrength;// 0 Gentle, 1 Normal, 2 Strong: how sure the model must be
                        // before a time-frequency cell counts as voice
+    int   singModel;   // 0 Spleeter, 1 MDX-Net (when downloaded in the model lab)
 } DZAudioParams;
 
 #ifdef __cplusplus

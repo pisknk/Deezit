@@ -6,6 +6,7 @@
 #import <os/lock.h>
 #include <stdatomic.h>
 #import "DZVocalModel.h"
+#import "DZDemucsModel.h"
 #import "DZAudioParams.h"
 #import "DZLog.h"
 
@@ -25,7 +26,13 @@ enum {
     kRing = 1 << 18,           // ~5.9 s per ring
     kRingMask = kRing - 1,
     kFade = 4096,              // raw -> processed crossfade when holding starts
+    // MDX-Net 9482 (model lab): the same STFT, all 2048 bins (to ~22 kHz),
+    // complex in and out, a 256-frame window: 208 past + the same 32 new + 16 ahead
+    kMT = 256,
+    kMBins = kHalf,
+    kMCtx = kMT - kB - kL,
 };
+typedef enum { DZEngineSpleeter = 0, DZEngineMDX = 1 } DZEngine;
 static const double kSampleRate = 44100;
 static const double kStartHoldSeconds = 2.4;   // player queue needed before buffers are held
 static const double kPanicSeconds = 0.35;      // player queue under this while holding: give up
@@ -107,6 +114,10 @@ static BOOL setupFFT(void) {
     float *scratch[2];            // input span of one block
     float *specRe, *specIm;       // [ch][frame][kHalf]
     float *tmp[4];                // FFT temporaries + one time frame
+    float *maskL, *maskR;         // one frame's vocal masks [kHalf], Nyquist in [0] of maskNyq
+    float maskNyq[2];
+    int engine;                   // DZEngine of this session (changing it starts a new session)
+    float *hist;                  // MDX: [ch][kMT][re | im][kMBins], the model's window (lazily allocated)
     double inferMs;
     uint64_t blocks;
 }
@@ -115,6 +126,7 @@ static BOOL setupFFT(void) {
 @property (nonatomic, strong) NSMutableArray<DZHeld *> *held;
 @property (nonatomic, strong) dispatch_queue_t schedQ, computeQ;
 @property (nonatomic, strong) MLMultiArray *input;   // [1, 2, kT, kBins], also the context window
+@property (nonatomic, strong) MLMultiArray *mdxInput; // [1, 4, kMBins, kMT] L.re L.im R.re R.im, in the model's type
 @end
 
 @implementation DZSepNode
@@ -122,6 +134,7 @@ static BOOL setupFFT(void) {
     for (int c = 0; c < 2; c++) { free(inRing[c]); free(outRing[c]); free(scratch[c]); }
     free(specRe); free(specIm);
     for (int i = 0; i < 4; i++) free(tmp[i]);
+    free(maskL); free(maskR); free(hist);
 }
 @end
 
@@ -146,9 +159,11 @@ static DZSepNode *makeNode(AVAudioPlayerNode *node) {
     s->specRe = calloc(2 * kB * kHalf, sizeof(float));
     s->specIm = calloc(2 * kB * kHalf, sizeof(float));
     for (int i = 0; i < 4; i++) s->tmp[i] = calloc(kN, sizeof(float));
+    s->maskL = calloc(kHalf, sizeof(float));
+    s->maskR = calloc(kHalf, sizeof(float));
     NSError *err = nil;
     s.input = [[MLMultiArray alloc] initWithShape:@[@1, @2, @(kT), @(kBins)] dataType:MLMultiArrayDataTypeFloat32 error:&err];
-    if (!s.input || !s->inRing[1] || !s->outRing[1] || !s->specIm || !s->tmp[3]) return nil;
+    if (!s.input || !s->inRing[1] || !s->outRing[1] || !s->specIm || !s->tmp[3] || !s->maskR) return nil;
     memset(s.input.dataPointer, 0, sizeof(float) * 2 * kT * kBins);
     s.node = node;
     s.held = [NSMutableArray array];
@@ -222,6 +237,27 @@ static inline float maskAt(const DZMaskView *v, int c, int t, int k) {
     }
 }
 
+#pragma mark - engine
+
+// The engine Sing uses now and its model (nil while it loads). MDX-Net when
+// picked and downloaded; else Spleeter when downloaded; else MDX-Net if that
+// is all there is.
+static MLModel *engineModel(DZEngine *engine) {
+    BOOL mdx = DZLabModelInstalled(kDZLabMDX);
+    if (mdx && (DZPrefsAudioParams().singModel == 1 || DZVocalModelGetState() != DZVocalModelReady)) {
+        *engine = DZEngineMDX;
+        return DZLabModelGet(kDZLabMDX);
+    }
+    *engine = DZEngineSpleeter;
+    return DZVocalModelGetState() == DZVocalModelReady ? DZVocalModelGet() : nil;
+}
+
+static MLModel *modelFor(DZEngine engine) {
+    return engine == DZEngineMDX ? DZLabModelGet(kDZLabMDX) : DZVocalModelGet();
+}
+
+static const char *engineName(int engine) { return engine == DZEngineMDX ? "MDX-Net" : "Spleeter"; }
+
 #pragma mark - compute
 
 static void runCompute(DZSepNode *s, uint64_t gen);
@@ -264,6 +300,41 @@ static inline float shapeMask(float m, const DZStrength *k) {
     return v < 0 ? 0 : (v > 1 ? 1 : v);
 }
 
+// MDX-Net: the model's window and input, made on first use (8 MB each).
+static BOOL mdxBuffers(DZSepNode *s, MLModel *model) {
+    if (!s->hist) {
+        s->hist = calloc((size_t)2 * kMT * 2 * kMBins, sizeof(float));
+        if (!s->hist) return NO;
+    }
+    MLMultiArrayDataType type = MLMultiArrayDataTypeFloat32;
+    if (@available(iOS 16.0, *)) {
+        MLMultiArrayConstraint *c = model.modelDescription.inputDescriptionsByName[@"input"].multiArrayConstraint;
+        if (c.dataType == MLMultiArrayDataTypeFloat16) type = MLMultiArrayDataTypeFloat16;
+    }
+    if (!s.mdxInput || s.mdxInput.dataType != type) {
+        NSError *err = nil;
+        s.mdxInput = [[MLMultiArray alloc] initWithShape:@[@1, @4, @(kMBins), @(kMT)] dataType:type error:&err];
+    }
+    return s.mdxInput != nil;
+}
+
+// MDX-Net: the window [ch][t][re | im][k] -> the model's [1, 4, k, t] input.
+static void mdxFill(DZSepNode *s) {
+    BOOL half = s.mdxInput.dataType != MLMultiArrayDataTypeFloat32;
+    float *f32 = half ? NULL : (float *)s.mdxInput.dataPointer;
+    _Float16 *f16 = half ? (_Float16 *)s.mdxInput.dataPointer : NULL;
+    for (int c = 0; c < 2; c++) {
+        for (int part = 0; part < 2; part++) {
+            long plane = (long)(2 * c + part) * kMBins * kMT;
+            for (int t = 0; t < kMT; t++) {
+                const float *src = s->hist + (((long)c * kMT + t) * 2 + part) * kMBins;
+                if (half) for (int k = 0; k < kMBins; k++) f16[plane + (long)k * kMT + t] = (_Float16)src[k];
+                else for (int k = 0; k < kMBins; k++) f32[plane + (long)k * kMT + t] = src[k];
+            }
+        }
+    }
+}
+
 static void runCompute(DZSepNode *s, uint64_t gen) {
     const int span = kSpan;
     for (;;) {
@@ -273,6 +344,7 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
             s->clearPending = NO;
             for (int c = 0; c < 2; c++) memset(s->outRing[c], 0, kRing * sizeof(float));
             memset(s.input.dataPointer, 0, sizeof(float) * 2 * kT * kBins);
+            if (s->hist) memset(s->hist, 0, sizeof(float) * 2 * kMT * 2 * kMBins);
         }
         int64_t f0 = s->nextFrame, from = f0 * kH;
         if (s->inCount < from + span || s->inCount - from > kRing) {
@@ -284,27 +356,32 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
             for (int i = 0; i < span; i++) s->scratch[c][i] = s->inRing[c][(from + i) & kRingMask];
         }
         float cutPrev = s->lastCut, backPrev = s->lastBacking;
+        DZEngine engine = (DZEngine)s->engine;
         os_unfair_lock_unlock(&s->lock);
 
         DZAudioParams params = DZPrefsAudioParams();
         float cut = params.vocalCut, backing = params.backingKeep;
         const DZStrength *strength = &kDZStrengths[params.singStrength < 0 ? 0 : params.singStrength > 2 ? 2 : params.singStrength];
-        MLModel *model = DZVocalModelGet();
-        if (!model) {
+        MLModel *model = modelFor(engine);
+        if (!model || (engine == DZEngineMDX && !mdxBuffers(s, model))) {
             os_unfair_lock_lock(&s->lock);
             if (s->gen == gen) { s->degraded = YES; releaseHeldRaw(s); s->computing = NO; }
             os_unfair_lock_unlock(&s->lock);
-            note(@"model unavailable, playing without Sing");
+            note([NSString stringWithFormat:@"%s unavailable, playing without Sing", engineName(engine)]);
             return;
         }
 
-        // Model window = frames [f0 - 80, f0 + 48): 80 past, the 32 new ones,
+        // Model window = frames [f0 - ctx, f0 + 48): the past, the 32 new ones,
         // 16 look-ahead. Slide it by 32 and (re)compute frames f0 ... f0+47;
         // the complex spectra are kept for the 32 new ones only.
+        // Spleeter takes magnitudes (1024 bins), MDX-Net the complex spectrum
+        // (2048 bins, DC's imaginary part 0, Nyquist dropped), both unscaled.
         float *mag = (float *)s.input.dataPointer;
         for (int c = 0; c < 2; c++) {
             float *m = mag + c * kT * kBins;
-            memmove(m, m + kB * kBins, sizeof(float) * (kT - kB) * kBins);
+            float *h = engine == DZEngineMDX ? s->hist + (long)c * kMT * 2 * kMBins : NULL;
+            if (h) memmove(h, h + (long)kB * 2 * kMBins, sizeof(float) * (kMT - kB) * 2 * kMBins);
+            else memmove(m, m + kB * kBins, sizeof(float) * (kT - kB) * kBins);
             for (int j = 0; j < kB + kL; j++) {
                 float *frame = s->tmp[2];
                 vDSP_vmul(s->scratch[c] + j * kH, 1, sWindow, 1, frame, 1, kN);
@@ -317,24 +394,40 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
                     im = s->tmp[3] + kHalf;
                 }
                 rfft(frame, re, im, s->tmp[0], s->tmp[1]);
-                float *row = m + (kCtx + j) * kBins;
-                row[0] = fabsf(re[0]) / sFwdScale;                        // DC (im[0] holds Nyquist)
-                for (int k = 1; k < kBins; k++) row[k] = hypotf(re[k], im[k]) / sFwdScale;
+                if (h) {
+                    float *rowRe = h + ((long)(kMCtx + j) * 2) * kMBins, *rowIm = rowRe + kMBins;
+                    float inv = 1.0f / sFwdScale;
+                    vDSP_vsmul(re, 1, &inv, rowRe, 1, kMBins);
+                    vDSP_vsmul(im, 1, &inv, rowIm, 1, kMBins);
+                    rowIm[0] = 0;                                         // packed Nyquist, not DC's imaginary part
+                } else {
+                    float *row = m + (kCtx + j) * kBins;
+                    row[0] = fabsf(re[0]) / sFwdScale;                    // DC (im[0] holds Nyquist)
+                    for (int k = 1; k < kBins; k++) row[k] = hypotf(re[k], im[k]) / sFwdScale;
+                }
             }
         }
 
         CFTimeInterval t0 = CACurrentMediaTime();
         NSError *err = nil;
-        MLDictionaryFeatureProvider *in = [[MLDictionaryFeatureProvider alloc]
-            initWithDictionary:@{ @"magnitude": [MLFeatureValue featureValueWithMultiArray:s.input] } error:&err];
+        MLDictionaryFeatureProvider *in;
+        if (engine == DZEngineMDX) {
+            mdxFill(s);
+            in = [[MLDictionaryFeatureProvider alloc]
+                initWithDictionary:@{ @"input": [MLFeatureValue featureValueWithMultiArray:s.mdxInput] } error:&err];
+        } else {
+            in = [[MLDictionaryFeatureProvider alloc]
+                initWithDictionary:@{ @"magnitude": [MLFeatureValue featureValueWithMultiArray:s.input] } error:&err];
+        }
         id<MLFeatureProvider> out = in ? [model predictionFromFeatures:in error:&err] : nil;
-        MLMultiArray *masks = [out featureValueForName:@"vocal_mask"].multiArrayValue;
+        MLMultiArray *masks = [out featureValueForName:engine == DZEngineMDX ? @"output" : @"vocal_mask"].multiArrayValue;
         double ms = (CACurrentMediaTime() - t0) * 1000;
         if (!masks || masks.strides.count != 4) {
             os_unfair_lock_lock(&s->lock);
             if (s->gen == gen) { s->degraded = YES; releaseHeldRaw(s); s->computing = NO; }
             os_unfair_lock_unlock(&s->lock);
-            note([NSString stringWithFormat:@"model run failed (%@), playing without Sing", err.localizedDescription ?: @"no output"]);
+            note([NSString stringWithFormat:@"%s run failed (%@), playing without Sing", engineName(engine),
+                  err.localizedDescription ?: @"no output"]);
             return;
         }
         DZMaskView view = { masks.dataPointer, masks.dataType,
@@ -352,30 +445,52 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
             float cutLead = cutPrev + (cut - cutPrev) * step;
             float keep = backPrev + (backing - backPrev) * step;
             float cutSide = cutLead * (1.0f - keep);
-            int t = kCtx + j;
             float *reL = s->specRe + j * kHalf, *imL = s->specIm + j * kHalf;
             float *reR = s->specRe + (kB + j) * kHalf, *imR = s->specIm + (kB + j) * kHalf;
 
-            // above the model's range (~11 kHz up): its mean mask over ~8.3-11 kHz,
-            // so the singer's "s" / "t" go with the voice
-            float hiL = 0, hiR = 0;
-            if (strength->hiBand > 0) {
-                for (int k = kHiFrom; k < kBins; k++) {
-                    hiL += shapeMask(maskAt(&view, 0, t, k), strength);
-                    hiR += shapeMask(maskAt(&view, 1, t, k), strength);
+            if (engine == DZEngineMDX) {
+                // MDX-Net gives the vocals' spectrum: their share of each bin,
+                // |vocals| / |mix| (at most 1), is the mask, shaped by Strength.
+                // It covers every bin, so no high-band stand-in is needed.
+                int t = kMCtx + j;
+                for (int c = 0; c < 2; c++) {
+                    const float *re = c ? reR : reL, *im = c ? imR : imL;
+                    float *mk = c ? s->maskR : s->maskL;
+                    for (int k = 0; k < kMBins; k++) {
+                        float vr = maskAt(&view, 2 * c, k, t), vi = maskAt(&view, 2 * c + 1, k, t);
+                        float xr = re[k] / sFwdScale, xi = k ? im[k] / sFwdScale : 0;
+                        float mix = hypotf(xr, xi);
+                        float m = mix > 1e-9f ? hypotf(vr, vi) / mix : 0;
+                        mk[k] = shapeMask(m > 1 ? 1 : m, strength);
+                    }
+                    s->maskNyq[c] = mk[kMBins - 1];
                 }
-                hiL *= strength->hiBand / (kBins - kHiFrom);
-                hiR *= strength->hiBand / (kBins - kHiFrom);
+            } else {
+                // above the model's range (~11 kHz up): its mean mask over ~8.3-11 kHz,
+                // so the singer's "s" / "t" go with the voice
+                int t = kCtx + j;
+                float hiL = 0, hiR = 0;
+                if (strength->hiBand > 0) {
+                    for (int k = kHiFrom; k < kBins; k++) {
+                        hiL += shapeMask(maskAt(&view, 0, t, k), strength);
+                        hiR += shapeMask(maskAt(&view, 1, t, k), strength);
+                    }
+                    hiL *= strength->hiBand / (kBins - kHiFrom);
+                    hiR *= strength->hiBand / (kBins - kHiFrom);
+                }
+                for (int k = 0; k < kHalf; k++) {
+                    s->maskL[k] = k < kBins ? shapeMask(maskAt(&view, 0, t, k), strength) : hiL;
+                    s->maskR[k] = k < kBins ? shapeMask(maskAt(&view, 1, t, k), strength) : hiR;
+                }
+                s->maskNyq[0] = hiL;
+                s->maskNyq[1] = hiR;
             }
 
-            unmix(&reL[0], &reR[0], shapeMask(maskAt(&view, 0, t, 0), strength),
-                  shapeMask(maskAt(&view, 1, t, 0), strength), cutLead, cutSide);                       // DC
-            unmix(&imL[0], &imR[0], hiL, hiR, cutLead, cutSide);                                       // Nyquist
+            unmix(&reL[0], &reR[0], s->maskL[0], s->maskR[0], cutLead, cutSide);                   // DC
+            unmix(&imL[0], &imR[0], s->maskNyq[0], s->maskNyq[1], cutLead, cutSide);              // Nyquist
             for (int k = 1; k < kHalf; k++) {
-                float mL = k < kBins ? shapeMask(maskAt(&view, 0, t, k), strength) : hiL;
-                float mR = k < kBins ? shapeMask(maskAt(&view, 1, t, k), strength) : hiR;
-                unmix(&reL[k], &reR[k], mL, mR, cutLead, cutSide);
-                unmix(&imL[k], &imR[k], mL, mR, cutLead, cutSide);
+                unmix(&reL[k], &reR[k], s->maskL[k], s->maskR[k], cutLead, cutSide);
+                unmix(&imL[k], &imR[k], s->maskL[k], s->maskR[k], cutLead, cutSide);
             }
 
             int64_t base = (f0 + j) * kH;
@@ -435,12 +550,14 @@ BOOL DZSingSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioNo
     DZSepNode *s = objc_getAssociatedObject(node, kDZSepKey);
     float cut = DZPrefsAudioParams().vocalCut;
     BOOL wanted = cut > 0.001f;
-    MLModel *model = wanted ? DZVocalModelGet() : nil;
+    DZEngine engine = DZEngineSpleeter;
+    MLModel *model = wanted ? engineModel(&engine) : nil;
     BOOL active = wanted && model && formatOK(buffer) && setupFFT();
     if (!s && !active) return NO;
     if (!s) {
         s = makeNode(node);
         if (!s) return NO;
+        s->engine = engine;
         objc_setAssociatedObject(node, kDZSepKey, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         note([NSString stringWithFormat:@"on for player #%lu", (unsigned long)s.serial]);
     }
@@ -453,6 +570,15 @@ BOOL DZSingSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioNo
         enqueueSchedule(s, buffer, handler);
         os_unfair_lock_unlock(&s->lock);
         return YES;
+    }
+
+    if (s->engine != (int)engine) {
+        // other model: its window means nothing to this one, start over
+        // (held buffers go as they are; the new one warms up like at a track start)
+        if (s->inCount > 0 || s.held.count) resetSession(s);
+        releaseHeldRaw(s);
+        s->engine = engine;
+        note([NSString stringWithFormat:@"player #%lu now uses %s", (unsigned long)s.serial, engineName(engine)]);
     }
 
     AVAudioFrameCount n = buffer.frameLength;
@@ -517,7 +643,8 @@ void DZSingStop(AVAudioPlayerNode *node) {
 NSString *DZSingStatus(void) {
     DZVocalModelState state = DZVocalModelGetState();
     float cut = DZPrefsAudioParams().vocalCut;
-    if (state != DZVocalModelReady) return [@"sing: model " stringByAppendingString:DZVocalModelStatusText()];
+    if (state != DZVocalModelReady && !DZLabModelInstalled(kDZLabMDX))
+        return [@"sing: model " stringByAppendingString:DZVocalModelStatusText()];
     if (cut <= 0.001f) return @"sing: model ready, vocals at 100% (off)";
     DZSepNode *s;
     NSString *last;
@@ -525,9 +652,9 @@ NSString *DZSingStatus(void) {
     if (!s) return [NSString stringWithFormat:@"sing: vocals %d%%, waiting for playback%@", (int)lroundf((1 - cut) * 100),
                     last ? [@" · " stringByAppendingString:last] : @""];
     os_unfair_lock_lock(&s->lock);
-    NSString *line = [NSString stringWithFormat:@"sing: vocals %d%%, backing %d%% kept, %@ · player #%lu %@ · held %.2f s · "
+    NSString *line = [NSString stringWithFormat:@"sing (%s): vocals %d%%, backing %d%% kept, %@ · player #%lu %@ · held %.2f s · "
                       @"player queue %.2f s · %llu blocks · model %.0f ms%@",
-                      (int)lroundf((1 - cut) * 100), (int)lroundf(DZPrefsAudioParams().backingKeep * 100),
+                      engineName(s->engine), (int)lroundf((1 - cut) * 100), (int)lroundf(DZPrefsAudioParams().backingKeep * 100),
                       @[@"gentle", @"normal", @"strong"][MIN(MAX(DZPrefsAudioParams().singStrength, 0), 2)], (unsigned long)s.serial,
                       s->degraded ? @"PAUSED" : (s->holding ? @"separating" : @"warming up"),
                       s.held.count ? (s->inCount - s.held.firstObject.start) / kSampleRate : 0.0,

@@ -112,6 +112,18 @@ typedef NS_ENUM(NSInteger, DZSection) {
     return self.pageTitle != nil;
 }
 
+// Sing works with either model: Spleeter (Settings -> Sing) or MDX-Net (model lab).
+static BOOL singReady(void) {
+    return DZVocalModelGetState() == DZVocalModelReady || DZLabModelInstalled(kDZLabMDX);
+}
+
+// Which model Sing uses (same choice as the separator makes).
+static NSInteger singModelInUse(void) {
+    if (!DZLabModelInstalled(kDZLabMDX)) return 0;
+    if (DZVocalModelGetState() != DZVocalModelReady) return 1;
+    return DZPrefFloat(kDZSingModel) >= 0.5f ? 1 : 0;
+}
+
 - (BOOL)shows:(NSInteger)section {
     switch (section) {
         case DZSectionEffect:
@@ -182,7 +194,9 @@ typedef NS_ENUM(NSInteger, DZSection) {
 }
 
 - (void)demucsChanged {
-    [self reload:[NSIndexSet indexSetWithIndex:DZSectionDemucs]];
+    NSMutableIndexSet *sections = [NSMutableIndexSet indexSetWithIndex:DZSectionDemucs];
+    [sections addIndex:DZSectionSing];
+    [self reload:sections];
 }
 
 - (void)reloadSliders {
@@ -200,7 +214,8 @@ typedef NS_ENUM(NSInteger, DZSection) {
     if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
-        case DZSectionSing: return DZVocalModelGetState() == DZVocalModelReady ? 3 : 1;   // Vocals, Backing vocals, Strength
+        case DZSectionSing:                                     // Vocals, Backing vocals, Strength, + Model with both
+            return !singReady() ? 1 : (DZLabModelInstalled(kDZLabMDX) && DZVocalModelGetState() == DZVocalModelReady ? 4 : 3);
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
         case DZSectionReverb: return 3;
@@ -237,8 +252,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
         case DZSectionEffect:
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionSing:
-            return DZVocalModelGetState() == DZVocalModelReady
-                ? @"Takes the singing out with an on-device AI model. Backing vocals keeps the harmonies spread left and right "
+            return singReady()
+                ? @"Takes the singing out with an on-device AI model: Spleeter (by Deezer Research) or MDX-Net (UVR's 9482, "
+                  @"from Deezit Settings → Model lab; cleaner, keeps more of the instruments and the highs). Backing vocals keeps "
+                  @"the harmonies spread left and right "
                   @"and removes only the centred lead. Strength: Gentle only removes what the model is sure is voice "
                   @"(instruments like violins and claps stay, a little voice may remain); Strong removes more, instruments "
                   @"included. Changes are heard after about 3 seconds."
@@ -252,10 +269,10 @@ typedef NS_ENUM(NSInteger, DZSection) {
                    @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
                    @"Turn it up or down with Playback Controls → Sing → Vocals.";
         case DZSectionDemucs:
-            return @"Candidate Sing models, benchmarked on this iPhone: UVR MDX-Net vocal models 9482 (by Anjok07) and Voc FT "
-                   @"(by Kimberley Jensen), MIT licence, Core ML conversion by gyoom; about 50 MB for both. The benchmark times each "
-                   @"one and shows how much runs on the Neural Engine, which Sing needs to keep working with the screen locked. "
-                   @"Playback keeps using Spleeter. A bigger model is skipped when there isn't enough memory for it. Takes a minute or two. "
+            return @"MDX-Net: UVR's MDX-Net 9482 vocal model (by Anjok07, MIT licence; about 14 MB), converted to Core ML and "
+                   @"checked against the original in Deezit's CI. Once downloaded, pick it in Playback Controls → Sing → Model. "
+                   @"The benchmark times it on this iPhone and shows how much runs on the Neural Engine, which Sing needs to keep "
+                   @"working with the screen locked. Takes about a minute. "
                    @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";
         case DZSectionLockScreen:
             return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
@@ -287,7 +304,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
             return c;
         }
         case DZSectionSing: {
-            if (DZVocalModelGetState() != DZVocalModelReady) {
+            if (!singReady()) {
                 UITableViewCell *c = [self basicCell:tv at:ip];
                 UIListContentConfiguration *cfg = [UIListContentConfiguration subtitleCellConfiguration];
                 cfg.text = @"Vocals";
@@ -295,6 +312,18 @@ typedef NS_ENUM(NSInteger, DZSection) {
                 cfg.secondaryTextProperties.color = UIColor.secondaryLabelColor;
                 cfg.image = [UIImage systemImageNamed:@"music.mic"];
                 c.contentConfiguration = cfg;
+                return c;
+            }
+            if (ip.row == 3) {
+                UITableViewCell *c = [self basicCell:tv at:ip];
+                UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+                cfg.text = @"Model";
+                c.contentConfiguration = cfg;
+                UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Spleeter", @"MDX-Net"]];
+                seg.selectedSegmentIndex = singModelInUse();
+                [seg addTarget:self action:@selector(singModelChanged:) forControlEvents:UIControlEventValueChanged];
+                [seg sizeToFit];
+                c.accessoryView = seg;
                 return c;
             }
             if (ip.row == 2) {
@@ -455,6 +484,11 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 - (void)strengthChanged:(UISegmentedControl *)seg {
     DZPrefSet(kDZSingStrength, @(seg.selectedSegmentIndex));
+}
+
+- (void)singModelChanged:(UISegmentedControl *)seg {
+    DZPrefSet(kDZSingModel, @(seg.selectedSegmentIndex));
+    if (seg.selectedSegmentIndex == 1) DZLabModelGet(kDZLabMDX);   // start loading it now
 }
 
 - (void)toggleLockArtwork:(UISwitch *)sw {

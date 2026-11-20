@@ -16,6 +16,7 @@ NSString *const kDZLockArtwork = @"lockArtwork";
 NSString *const kDZVocals = @"vocals";
 NSString *const kDZBackingVocals = @"backingVocals";
 NSString *const kDZSingStrength = @"singStrength";
+NSString *const kDZSingModel = @"singModel";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -31,6 +32,7 @@ static _Atomic float sReverbDamp;
 static _Atomic float sVocalCut;
 static _Atomic float sBackingKeep;
 static _Atomic int sSingStrength = 1;
+static _Atomic int sSingModel;
 
 static NSDictionary *defaultValues(void) {
     return @{
@@ -45,6 +47,7 @@ static NSDictionary *defaultValues(void) {
         kDZVocals: @1.0f,
         kDZBackingVocals: @0.0f,
         kDZSingStrength: @1,
+        kDZSingModel: @0,
     };
 }
 
@@ -60,6 +63,7 @@ static void refreshAtomics(void) {
     atomic_store(&sBackingKeep, clampf([sDefaults floatForKey:kDZBackingVocals], 0, 1));
     NSInteger strength = [sDefaults integerForKey:kDZSingStrength];
     atomic_store(&sSingStrength, (int)(strength < 0 ? 0 : strength > 2 ? 2 : strength));
+    atomic_store(&sSingModel, [sDefaults integerForKey:kDZSingModel] == 1 ? 1 : 0);
 }
 
 static void postChanged(void) {
@@ -121,6 +125,7 @@ DZAudioParams DZPrefsAudioParams(void) {
     p.vocalCut = atomic_load_explicit(&sVocalCut, memory_order_relaxed);
     p.backingKeep = atomic_load_explicit(&sBackingKeep, memory_order_relaxed);
     p.singStrength = atomic_load_explicit(&sSingStrength, memory_order_relaxed);
+    p.singModel = atomic_load_explicit(&sSingModel, memory_order_relaxed);
     if (p.speed <= 0) p.speed = 1.0f; // never bootstrapped yet
     return p;
 }

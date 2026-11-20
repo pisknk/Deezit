@@ -26,6 +26,11 @@ static NSURLSessionTask *sTask;
 static NSTimer *sTimer;
 static BOOL sBenchRunning;
 static NSString *sBenchResult;
+static NSSet<NSString *> *sInstalledNames;                  // downloaded + compiled, by name
+static NSMutableDictionary<NSString *, MLModel *> *sLoaded;  // loaded for playback
+static NSMutableSet<NSString *> *sLoadingNames;
+
+NSString *const kDZLabMDX = @"mdx9482";
 
 static NSURL *dir(void) {
     NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
@@ -107,12 +112,21 @@ static void setup(void) {
             [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
         }
         sState = have ? DZDemucsReady : DZDemucsNotInstalled;
+        sLoaded = [NSMutableDictionary dictionary];
+        sLoadingNames = [NSMutableSet set];
+        sInstalledNames = have ? [NSSet setWithArray:[functionsList() valueForKey:@"name"]] : [NSSet set];
         recoverCrash();
     });
 }
 
 static void setState(DZDemucsState state, NSString *error) {
-    @synchronized (sLock) { sState = state; sError = [error copy]; }
+    NSSet<NSString *> *names = state == DZDemucsReady ? [NSSet setWithArray:[functionsList() valueForKey:@"name"]] : [NSSet set];
+    @synchronized (sLock) {
+        sState = state;
+        sError = [error copy];
+        sInstalledNames = names;
+        if (state != DZDemucsReady) [sLoaded removeAllObjects];
+    }
     if (error) DZLog("demucs: %@", error);
     notify();
 }
@@ -251,6 +265,8 @@ void DZDemucsDownload(void) {
         sState = DZDemucsDownloading;
         sProgress = 0;
         sError = nil;
+        sInstalledNames = [NSSet set];
+        [sLoaded removeAllObjects];
     }
     notify();
     // the release's JSON lists the windows and their archives
@@ -287,6 +303,8 @@ void DZDemucsDelete(void) {
     @synchronized (sLock) {
         if (sState == DZDemucsDownloading || sState == DZDemucsPreparing || sBenchRunning) return;
         sBenchResult = nil;
+        sInstalledNames = [NSSet set];
+        [sLoaded removeAllObjects];
     }
     removeModels();
     [NSFileManager.defaultManager removeItemAtURL:resultURL() error:nil];
@@ -603,4 +621,31 @@ void DZDemucsRunBenchmark(void) {
         @synchronized (sLock) { sBenchRunning = NO; sBenchResult = result; }
         notify();
     });
+}
+
+#pragma mark - playback
+
+BOOL DZLabModelInstalled(NSString *name) {
+    setup();
+    @synchronized (sLock) { return [sInstalledNames containsObject:name]; }
+}
+
+MLModel *DZLabModelGet(NSString *name) {
+    setup();
+    @synchronized (sLock) {
+        MLModel *m = sLoaded[name];
+        if (m || ![sInstalledNames containsObject:name] || [sLoadingNames containsObject:name]) return m;
+        [sLoadingNames addObject:name];
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        MLModel *model = [MLModel modelWithContentsOfURL:windowURL(name) configuration:config() error:&err];
+        @synchronized (sLock) {
+            [sLoadingNames removeObject:name];
+            if (model && [sInstalledNames containsObject:name]) sLoaded[name] = model;
+        }
+        DZLog("lab: %@ %@", name, model ? @"loaded for playback" : [@"failed to load: " stringByAppendingString:err.localizedDescription ?: @"?"]);
+        notify();
+    });
+    return nil;
 }

@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+@class MLModel;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -29,5 +30,13 @@ void DZDemucsDownload(void);
 void DZDemucsCancel(void);
 void DZDemucsDelete(void);
 void DZDemucsRunBenchmark(void);
+
+// For playback (Sing): a downloaded lab model by name, e.g. @"mdx9482".
+// Installed = downloaded and compiled (cheap, cached). Get returns nil until it
+// is loaded; the first call starts loading it in the background
+// (CPU + Neural Engine), and DZDemucsChangedNotification follows.
+extern NSString *const kDZLabMDX;   // @"mdx9482": UVR MDX-Net 9482 (n_fft 4096, 2048 bins, 256 frames)
+BOOL DZLabModelInstalled(NSString *name);
+MLModel * _Nullable DZLabModelGet(NSString *name);
 
 NS_ASSUME_NONNULL_END

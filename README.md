@@ -24,7 +24,7 @@ generator (plain ObjC runtime).
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
 | Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
 | ••• menu row | **working**: "Playback Controls" as the first option of the full-screen player's ••• menu |
-| Sing (AI vocal removal) | Spleeter 2-stems on Core ML, downloaded from Settings; processed as Deezer schedules audio (new, not yet tested on a device) |
+| Sing (AI vocal removal) | **working** with Spleeter 2-stems; UVR MDX-Net 9482 as a second model (Neural Engine, 49 ms per 5.9 s on an iPhone 13; new, not yet heard on a device) |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -44,7 +44,7 @@ Gestures, anywhere in Deezer:
 
 | Gesture | Opens |
 |---|---|
-| **Three-finger hold** | Deezit Settings: Sing model download, lock-screen covers |
+| **Three-finger hold** | Deezit Settings: Sing model download, model lab (MDX-Net), lock-screen covers |
 | **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
 
 The first launch of each Deezit version shows a short banner to confirm the
@@ -84,6 +84,11 @@ Then sideload `Deezer-Deezit.ipa` as usual.
    counts as voice, so Gentle and Normal leave instruments it only
    half-mistakes for singing (violins, claps, synth leads) alone. Changes
    are heard after about 3 seconds.
+3. Optional: **Settings → Model lab → MDX-Net → Download** (about 14 MB), then
+   **Playback Controls → Sing → Model → MDX-Net**. UVR's MDX-Net 9482 sees the
+   whole spectrum (to ~22 kHz) and estimates the vocals themselves, so more of
+   the instruments and the highs survive. Switching models restarts Sing for a
+   moment, like the start of a track.
 
 The model is **Spleeter 2-stems** (Deezer Research, MIT licence), converted
 by `tools/vocal_model/convert.py` in `.github/workflows/vocal-model.yml`: the
@@ -106,22 +111,28 @@ Buffers pass through untouched until the player is well fed; if its queue
 ever runs low, Deezit lets everything through unprocessed for the rest of
 that track. The debug panel's `sing:` line shows what it is doing.
 
-### HT-Demucs (experimental)
+### MDX-Net (model lab)
 
-Settings → **HT-Demucs** downloads a bigger, cleaner vocal model: the vocals
-model of Demucs `htdemucs_ft` (Meta, MIT licence), built by
-`tools/vocal_model/convert_htdemucs.py` in
-`.github/workflows/vocal-model-htdemucs.yml`. The network is cut at the
-spectrogram (inputs `mix` + `spec`, outputs `vocals_spec` + `vocals_wave`) so the
-STFT stays on the phone; CI checks the split reproduces Demucs exactly and
-that Core ML matches PyTorch. It ships as an Apple Archive of the
-`.mlpackage`, unpacked and compiled on the phone.
+Settings → **Model lab** downloads **UVR MDX-Net 9482** (Ultimate Vocal
+Remover, by Anjok07, MIT licence). `tools/vocal_model/fetch_mdx.py` in
+`.github/workflows/vocal-model-mdx.yml` converts UVR's `.onnx` itself
+(onnx2torch -> Core ML, fp16) and checks it against ONNX Runtime on a
+realistic spectrogram. Core ML mis-converted its 2x2 stride-2 convolutions
+(also in the public Core ML port), so CI rewrites them in an equivalent form
+first (pixel-unshuffle + 1x1 conv, 1x1 conv + pixel-shuffle); the fp32
+conversion then matches ONNX at 107.6 dB, fp16 at 28.3 dB, far under the
+model's own separation error. UVR's Voc FT model loses too much in fp16
+(15 dB) and is skipped.
 
-For now it is only **benchmarked** (Run benchmark): time per 7.8 s window on
-this iPhone, and Core ML's compute plan (iOS 17.4+) showing the share of the
-work on the Neural Engine / CPU / GPU. Sing must stay off the GPU to work
-with the screen locked. Playback keeps using Spleeter until the numbers say
-HT-Demucs can keep up.
+It takes the same 4096 / 1024 STFT as complex numbers, all 2048 bins, in a
+256-frame window (208 past, the same 32 new and 16 ahead as Spleeter), and
+returns the vocals' spectrum; their share of each bin, |vocals| / |mix|, is
+the mask the Vocals / Backing vocals / Strength controls work on. Run
+benchmark (iPhone 13): 49 ms per run, 24 MB, 100% Neural Engine.
+
+**HT-Demucs** (Demucs `htdemucs_ft` vocals, `convert_htdemucs.py`) was tried
+first: on an iPhone 13 it ran entirely on the CPU, 1.1 s per 2.6 s window and
+1.3 GB, too slow for live Sing.
 
 ## Animated lock-screen covers
 
@@ -164,7 +175,8 @@ DZDSP.*                     engine-agnostic DSP core (C)
 DZAudioHook.x               AVAudioEngine backend: splices varispeed + reverb before the output node
 DZSing.x / DZSeparator.*    "Sing": AI vocal removal on Deezer's buffers as they are scheduled
 DZVocalModel.*              vocal model download / compile / load
-tools/vocal_model/          Spleeter 2-stems -> Core ML converter (run by vocal-model.yml)
+DZDemucsModel.*             model lab: MDX-Net download, benchmark, playback loading
+tools/vocal_model/          Spleeter / MDX-Net / HT-Demucs -> Core ML (vocal-model*.yml)
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
@@ -183,6 +195,9 @@ docs/ANALYSIS.md            findings + hook decision table
 Sing uses [Spleeter](https://github.com/deezer/spleeter)'s pretrained
 2-stems model by Deezer Research (MIT licence), converted to Core ML; the
 PyTorch port in `tools/vocal_model/convert.py` was written for Deezit.
+Its MDX-Net option is UVR's [MDX-Net 9482](https://github.com/TRvlvr/model_repo)
+vocal model by Anjok07 (Ultimate Vocal Remover, MIT licence), on KUIELab's
+MDX-Net architecture, converted to Core ML in Deezit's CI.
 
 The Apple Music lookup (iTunes Search matching, web-player token, catalog
 `editorialVideo`) is adapted from
