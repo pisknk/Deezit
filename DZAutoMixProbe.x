@@ -42,6 +42,14 @@ static NSMutableDictionary<NSString *, NSNumber *> *sLastEvent;   // rate limit 
 
 static double clock_s(void) { return CACurrentMediaTime(); }
 
+// (not [DZRAudioPlayer class]: that would link against Deezer's class symbol)
+static NSObject *probeLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
 static id kv(id o, NSString *key) {
     if (!o || ![o respondsToSelector:NSSelectorFromString(key)]) return nil;
     @try { return [o valueForKey:key]; } @catch (NSException *e) { return nil; }
@@ -73,7 +81,7 @@ static NSString *position(DZRAudioPlayer *p) {
 // Chatty events (called often) are logged at most once a second each.
 static BOOL due(NSString *event) {
     double now = clock_s();
-    @synchronized ([DZRAudioPlayer class]) {
+    @synchronized (probeLock()) {
         if (!sLastEvent) sLastEvent = [NSMutableDictionary dictionary];
         if (now - sLastEvent[event].doubleValue < 1.0) return NO;
         sLastEvent[event] = @(now);
@@ -145,7 +153,7 @@ static void lookUpAnalysis(NSString *isrc, NSString *label) {
         return;
     }
     static NSMutableSet<NSString *> *asked;
-    @synchronized ([DZRAudioPlayer class]) {
+    @synchronized (probeLock()) {
         if (!asked) asked = [NSMutableSet set];
         if ([asked containsObject:isrc]) return;
         [asked addObject:isrc];
@@ -202,7 +210,7 @@ void DZAutoMixProbeBuffer(NSUInteger serial, AVAudioPCMBuffer *buffer, double ah
         sum += (double)ms * n;
     }
     double sr = buffer.format.sampleRate > 0 ? buffer.format.sampleRate : 44100;
-    @synchronized ([DZRAudioPlayer class]) {
+    @synchronized (probeLock()) {
         if (!sAcc) sAcc = [NSMutableDictionary dictionary];
         DZLevelAcc acc = {0, 0, 0};
         NSValue *v = sAcc[@(serial)];

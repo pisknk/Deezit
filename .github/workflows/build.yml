@@ -54,7 +54,7 @@ jobs:
         set -e
         if [ "$status" -ne 0 ]; then
           # compiler errors as an annotation (readable without signing in)
-          grep -E "error:|Error [0-9]" build.log | head -n 30 > errors.txt || true
+          grep -E -A3 "error:|Error [0-9]|Undefined symbols" build.log | head -n 40 > errors.txt || true
           [ -s errors.txt ] || tail -n 30 build.log > errors.txt
           python3 -c "import sys; t=open('errors.txt').read().replace('%','%25').replace('\r','').replace('\n','%0A'); print('::error title=build failed::' + t)"
           exit "$status"
