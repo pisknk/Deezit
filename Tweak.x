@@ -13,6 +13,7 @@
 #import "DZLockArtwork.h"
 #import "DZBufferProbe.h"
 #import "DZSeparator.h"
+#import "DZAutoMixProbe.h"
 
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
@@ -38,6 +39,7 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
         DZAudioInstall();
         DZBufferProbeInstall();
         DZSingInstall();            // after the probe, so its hook runs first
+        DZAutoMixProbeInstall();
         DZProbesInstall();
         DZPlayerMenuInstall();
         DZLockArtworkInstall();

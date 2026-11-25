@@ -23,6 +23,7 @@
 #include <float.h>
 #import "DZLog.h"
 #import "DZPrefs.h"
+#import "DZAutoMixProbe.h"
 
 @interface DZNodeStats : NSObject {
 @public
@@ -155,6 +156,9 @@ static void noteSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAu
         }
         maybeSummarize(s, now);
     }
+    // around a song change: this buffer's level, and when it will be heard
+    if (DZAutoMixProbeWants() && s.sampleRate > 0)
+        DZAutoMixProbeBuffer(s.serial, buffer, (queued - (long long)frames) / s.sampleRate);
 }
 
 static AVAudioNodeCompletionHandler wrapPlain(AVAudioPlayerNode *node, AVAudioFrameCount frames, AVAudioNodeCompletionHandler orig) {

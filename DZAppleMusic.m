@@ -198,6 +198,13 @@ static void catalogGet(NSString *path, BOOL retried, void (^done)(NSData *data, 
     });
 }
 
+void DZAppleCatalogGet(NSString *path, void (^done)(NSData *data, NSInteger status)) {
+    catalogGet(path, NO, ^(NSData *data, NSInteger status) {
+        if (data && status == 200) done(data, status);
+        else done(nil, status);
+    });
+}
+
 #pragma mark - name matching (TJCatalogMatch)
 
 static NSString *normalize(NSString *s) {

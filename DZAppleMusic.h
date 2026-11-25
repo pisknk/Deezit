@@ -27,4 +27,9 @@ void DZAppleMotionCover(NSString *title, NSString *artist, NSString * _Nullable 
 void DZAppleMotionCoverFromOtherReleases(NSString *title, NSString *artist, NSString * _Nullable excludeAlbumID,
                                          NSTimeInterval duration, DZMotionCoverResult done);
 
+// A GET on Apple Music's catalog with the web player's token, in this
+// storefront: `path` is what follows /v1/catalog/<storefront>/, already
+// percent-encoded. `data` is nil unless HTTP 200. On an arbitrary queue.
+void DZAppleCatalogGet(NSString *path, void (^done)(NSData * _Nullable data, NSInteger status));
+
 NS_ASSUME_NONNULL_END
