@@ -1,12 +1,11 @@
 // Two small changes to Deezer's player screens.
 //
 // 1. Up next (DZRQueueListViewController, a DZRCommonTableViewController):
-//    Deezer offers Delete on a swipe to the left only in its delete mode (the
-//    bar button that calls -displayDeleteButtons); its
-//    -tableView:trailingSwipeActionsConfigurationForRowAtIndexPath: builds a
-//    contextual action that calls -deleteRowInTableView:atIndexPath:. Deezit
-//    lets every row Deezer can delete be swiped at any time, to the left or to
-//    the right.
+//    its table stays in editing mode for the reorder handles, so iOS swipes
+//    no rows; Deezer deletes only in its delete mode (the Edit button,
+//    -displayDeleteButtons: a red minus per row, whose Delete action calls
+//    -deleteRowInTableView:atIndexPath:). Deezit adds its own swipe: drag a
+//    row to the right for a Delete button, keep dragging to delete it.
 //
 // 2. The artist · album line under the title (DZRPlayerMainViewController):
 //    Deezer's -didTapPlayerArtistAlbumButton opens the artist
@@ -26,9 +25,13 @@
 - (UITableView *)tableView;
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip;
 - (BOOL)canDeleteRowAtIndexPath:(NSIndexPath *)ip;
+- (void)deleteRowInTableView:(UITableView *)tv atIndexPath:(NSIndexPath *)ip;
 - (BOOL)canEditQueueList;
 - (BOOL)isDeleting;
 - (NSUInteger)currentTrackIndex;
+@end
+
+@interface DZRPlayerTrackCell : UITableViewCell
 @end
 
 @interface DZRPlayerMainViewController : UIViewController
@@ -236,6 +239,287 @@ static void logQueueState(DZRQueueListViewController *vc) {
     DZLog("%@", line);
 }
 
+#pragma mark - swipe right to delete
+
+// Up next keeps its table in editing mode (that's what shows the reorder
+// handles), and iOS doesn't swipe the rows of a table in editing mode: a row
+// with the delete style gets a red minus button in front of it instead
+// (Deezer shows those only in its own delete mode, after its Edit button).
+// So Deezit swipes the rows itself: drag a row to the right and a red Delete
+// button shows behind it. Let go past the button and it stays open (tap it
+// to delete, tap anywhere else or scroll to close); keep dragging past half
+// the row and letting go deletes it. Deleting goes through Deezer's own
+// -deleteRowInTableView:atIndexPath:, what its Delete action calls, so only
+// rows Deezer can delete (canDeleteRowAtIndexPath:) can be swiped.
+
+static const CGFloat kDZSwipeButton = 88;   // width of the open Delete button
+static const CGFloat kDZSwipeFull = 0.5;    // share of the row past which letting go deletes
+static void *kDZSwiperKey = &kDZSwiperKey;  // table -> its DZRowSwiper
+static void *kDZHiddenKey = &kDZHiddenKey;  // cell -> @YES while hidden after a delete
+
+static void restoreCell(UITableViewCell *cell) {
+    if (!objc_getAssociatedObject(cell, kDZHiddenKey)) return;
+    objc_setAssociatedObject(cell, kDZHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.alpha = 1;
+    cell.transform = CGAffineTransformIdentity;
+}
+
+// a touch on a row's reorder handle drags the row, never swipes it
+static BOOL onReorderControl(UITableView *tv, CGPoint p) {
+    UIView *hit = [tv hitTest:p withEvent:nil];
+    for (UIView *v = hit; v && v != tv; v = v.superview)
+        if ([NSStringFromClass([v class]) rangeOfString:@"Reorder"].location != NSNotFound) return YES;
+    return NO;
+}
+
+// Deezer's own title for its Delete action, in the app's language
+static NSString *deleteTitle(DZRQueueListViewController *vc, UITableView *tv, NSIndexPath *ip) {
+    UISwipeActionsConfiguration *c = [vc tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip];
+    NSString *t = c.actions.firstObject.title;
+    return t.length ? t : @"Delete";
+}
+
+@interface DZRowSwiper : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) DZRQueueListViewController *owner;
+@property (nonatomic, weak) UITableView *table;
+@property (nonatomic, strong) UIPanGestureRecognizer *pan;
+@property (nonatomic, strong) UITapGestureRecognizer *tap;
+@property (nonatomic, strong) UITableViewCell *cell;   // the row being swiped or left open
+@property (nonatomic, strong) UIButton *button;        // the red Delete behind it
+@property (nonatomic, strong) UILabel *label;
+@property (nonatomic) CGFloat offset, startOffset;
+@property (nonatomic) BOOL armed, open;
+- (void)closeAnimated:(BOOL)animated;
+@end
+
+static __weak DZRowSwiper *sSwiper;   // the Up next on screen
+
+@implementation DZRowSwiper
+
+- (instancetype)initWithOwner:(DZRQueueListViewController *)vc table:(UITableView *)tv {
+    if ((self = [super init])) {
+        _owner = vc;
+        _table = tv;
+        _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panned:)];
+        _pan.delegate = self;
+        _pan.maximumNumberOfTouches = 1;
+        [tv addGestureRecognizer:_pan];
+        // a sideways drag is ours; anything else fails at once and scrolls
+        [tv.panGestureRecognizer requireGestureRecognizerToFail:_pan];
+        [tv.panGestureRecognizer addTarget:self action:@selector(tableScrolled:)];
+        _tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tappedElsewhere:)];
+        _tap.delegate = self;
+        _tap.enabled = NO;   // only while a row is open, so taps on rows still play them
+        [tv addGestureRecognizer:_tap];
+    }
+    return self;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
+    if (g == self.tap) return self.button && ![touch.view isDescendantOfView:self.button];
+    return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
+    if (g == self.tap) return self.open;
+    UITableView *tv = self.table;
+    DZRQueueListViewController *vc = self.owner;
+    if (!tv || !vc) return NO;
+    CGPoint v = [self.pan velocityInView:tv];
+    if (fabs(v.x) <= fabs(v.y)) return NO;
+    CGPoint loc = [self.pan locationInView:tv], t = [self.pan translationInView:tv];
+    CGPoint start = CGPointMake(loc.x - t.x, loc.y - t.y);
+    NSIndexPath *ip = [tv indexPathForRowAtPoint:start];
+    if (!ip) return NO;
+    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+    BOOL openRow = self.open && cell && cell == self.cell;
+    if (v.x < 0 && !openRow) return NO;   // to the right, or back on the open row
+    if (onReorderControl(tv, start)) return NO;
+    return [vc canDeleteRowAtIndexPath:ip];
+}
+
+// the row where it is now, ignoring the swipe's translation
+- (CGRect)rowFrame {
+    UITableViewCell *c = self.cell;
+    CGSize s = c.bounds.size;
+    return CGRectMake(c.center.x - s.width / 2, c.center.y - s.height / 2, s.width, s.height);
+}
+
+- (void)setOffsetValue:(CGFloat)dx {
+    self.offset = dx;
+    self.cell.transform = dx > 0 ? CGAffineTransformMakeTranslation(dx, 0) : CGAffineTransformIdentity;
+    CGRect row = [self rowFrame];
+    self.button.frame = CGRectMake(row.origin.x, row.origin.y, dx, row.size.height);
+    // the label rides along the row's edge once the button is fully out
+    self.label.frame = CGRectMake(MAX(0, dx - kDZSwipeButton), 0, kDZSwipeButton, row.size.height);
+}
+
+- (void)attachTo:(UITableViewCell *)cell at:(NSIndexPath *)ip {
+    self.cell = cell;
+    self.offset = 0;
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.backgroundColor = UIColor.systemRedColor;
+    b.clipsToBounds = YES;
+    [b addTarget:self action:@selector(deleteTapped) forControlEvents:UIControlEventTouchUpInside];
+    UILabel *l = [UILabel new];
+    l.text = deleteTitle(self.owner, self.table, ip);
+    l.textColor = UIColor.whiteColor;
+    l.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    l.textAlignment = NSTextAlignmentCenter;
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.7;
+    [b addSubview:l];
+    [cell.superview insertSubview:b belowSubview:cell];
+    self.button = b;
+    self.label = l;
+    [self setOffsetValue:0];
+}
+
+- (void)panned:(UIPanGestureRecognizer *)g {
+    UITableView *tv = self.table;
+    switch (g.state) {
+        case UIGestureRecognizerStateBegan: {
+            CGPoint loc = [g locationInView:tv], t = [g translationInView:tv];
+            NSIndexPath *ip = [tv indexPathForRowAtPoint:CGPointMake(loc.x - t.x, loc.y - t.y)];
+            UITableViewCell *cell = ip ? [tv cellForRowAtIndexPath:ip] : nil;
+            if (!cell) {
+                g.enabled = NO;
+                g.enabled = YES;
+                return;
+            }
+            if (cell != self.cell) {
+                [self closeAnimated:YES];
+                [self attachTo:cell at:ip];
+            }
+            self.startOffset = self.offset;
+            self.armed = NO;
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            if (!self.cell) return;
+            CGFloat w = self.cell.bounds.size.width;
+            CGFloat dx = MAX(0, MIN(w, self.startOffset + [g translationInView:tv].x));
+            [self setOffsetValue:dx];
+            BOOL armed = dx > w * kDZSwipeFull;
+            if (armed != self.armed) {
+                self.armed = armed;
+                [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+            }
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            if (!self.cell) return;
+            CGFloat w = self.cell.bounds.size.width, dx = self.offset, vx = [g velocityInView:tv].x;
+            BOOL ended = g.state == UIGestureRecognizerStateEnded;
+            if (ended && (dx > w * kDZSwipeFull || (vx > 1500 && dx > w * 0.3))) [self deleteRow];
+            else if (ended && dx > kDZSwipeButton * 0.6 && vx > -200) [self openRow];
+            else [self closeAnimated:YES];
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+- (void)openRow {
+    self.open = YES;
+    self.tap.enabled = YES;
+    [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.9 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ [self setOffsetValue:kDZSwipeButton]; } completion:nil];
+}
+
+- (void)closeAnimated:(BOOL)animated {
+    UITableViewCell *cell = self.cell;
+    UIButton *b = self.button;
+    self.cell = nil;
+    self.button = nil;
+    self.label = nil;
+    self.open = NO;
+    self.armed = NO;
+    self.offset = 0;
+    self.tap.enabled = NO;
+    if (!cell && !b) return;
+    void (^back)(void) = ^{
+        cell.transform = CGAffineTransformIdentity;
+        b.frame = CGRectMake(b.frame.origin.x, b.frame.origin.y, 0, b.frame.size.height);
+    };
+    if (!animated) {
+        back();
+        [b removeFromSuperview];
+        return;
+    }
+    [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:1 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState animations:back
+                     completion:^(BOOL finished) { [b removeFromSuperview]; }];
+}
+
+- (void)deleteRow {
+    UITableView *tv = self.table;
+    DZRQueueListViewController *vc = self.owner;
+    UITableViewCell *cell = self.cell;
+    UIButton *b = self.button;
+    UILabel *l = self.label;
+    self.cell = nil;
+    self.button = nil;
+    self.label = nil;
+    self.open = NO;
+    self.armed = NO;
+    self.offset = 0;
+    self.tap.enabled = NO;
+    if (!cell) return;
+    CGFloat w = cell.bounds.size.width;
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
+        cell.transform = CGAffineTransformMakeTranslation(w, 0);
+        b.frame = CGRectMake(b.frame.origin.x, b.frame.origin.y, w, b.frame.size.height);
+        l.frame = CGRectMake(w - kDZSwipeButton, 0, kDZSwipeButton, b.frame.size.height);
+    } completion:^(BOOL finished) {
+        NSIndexPath *ip = tv ? [tv indexPathForCell:cell] : nil;
+        // hidden while Deezer takes the row out, then back for reuse
+        objc_setAssociatedObject(cell, kDZHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        cell.alpha = 0;
+        cell.transform = CGAffineTransformIdentity;
+        [UIView animateWithDuration:0.25 animations:^{ b.alpha = 0; } completion:^(BOOL f) { [b removeFromSuperview]; }];
+        if (ip && vc && [vc canDeleteRowAtIndexPath:ip]) {
+            DZLog("up next: row %ld deleted by a swipe", (long)ip.row);
+            [vc deleteRowInTableView:tv atIndexPath:ip];
+        } else {
+            DZLog("up next: swiped row is gone or can't be deleted any more, nothing deleted");
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            restoreCell(cell);
+        });
+    }];
+}
+
+- (void)deleteTapped {
+    if (self.cell) [self deleteRow];
+}
+
+- (void)tappedElsewhere:(UITapGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateEnded) [self closeAnimated:YES];
+}
+
+- (void)tableScrolled:(UIPanGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateBegan && self.cell) [self closeAnimated:YES];
+}
+
+@end
+
+static void installSwiper(DZRQueueListViewController *vc) {
+    UITableView *tv = [vc respondsToSelector:@selector(tableView)] ? [vc tableView] : nil;
+    if (![tv isKindOfClass:[UITableView class]]) return;
+    DZRowSwiper *s = objc_getAssociatedObject(tv, kDZSwiperKey);
+    if (!s) {
+        s = [[DZRowSwiper alloc] initWithOwner:vc table:tv];
+        objc_setAssociatedObject(tv, kDZSwiperKey, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        DZLog("up next: swipe a row to the right to delete it (table in editing mode: %@)", yesNo(tv.isEditing));
+    }
+    sSwiper = s;
+}
+
 #pragma mark - hooks
 
 %group DZQueueSwipeHooks
@@ -247,33 +531,19 @@ static void logQueueState(DZRQueueListViewController *vc) {
     holdContentPop(self, YES);
 }
 
-// Deezer gives a row the delete style only in its own delete mode (its bar
-// button's -displayDeleteButtons: canDeleteRowAtIndexPath: && isDeleting), and iOS shows no
-// swipe actions on a row without it. Rows Deezer can delete (the queue is
-// editable and it isn't the song playing) now always get it. This can't
-// depend on tableView.isEditing: iOS turns editing on while a row is being
-// swiped, so the old "!isEditing" check took the style away mid-swipe.
-- (UITableViewCellEditingStyle)tableView:(UITableView *)tv editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
-    if ([self canDeleteRowAtIndexPath:ip]) return UITableViewCellEditingStyleDelete;
-    return %orig;
-}
+%end
 
-// a swipe to the right: Deezer's own Delete, as on a swipe to the left
-%new
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tv leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
-    return [self tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip];
-}
+%end
 
-// iOS calls these as a row's swipe actions open and close (Deezer has
-// neither); a swipe that never logs "opened" never started
-%new
-- (void)tableView:(UITableView *)tv willBeginEditingRowAtIndexPath:(NSIndexPath *)ip {
-    DZLog("up next: swipe opened on row %ld (deletable %@)", (long)ip.row, yesNo([self canDeleteRowAtIndexPath:ip]));
-}
+// a swiped row's cell, when Deezer reuses it, goes back to normal
+%group DZQueueCellHooks
 
-%new
-- (void)tableView:(UITableView *)tv didEndEditingRowAtIndexPath:(NSIndexPath *)ip {
-    DZLog("up next: swipe closed on row %ld", ip ? (long)ip.row : -1L);
+%hook DZRPlayerTrackCell
+
+- (void)prepareForReuse {
+    %orig;
+    if (sSwiper.cell == (UITableViewCell *)self) [sSwiper closeAnimated:NO];
+    restoreCell((UITableViewCell *)self);
 }
 
 %end
@@ -291,13 +561,19 @@ static void logQueueState(DZRQueueListViewController *vc) {
     %orig;
     if (sQueueClass && [self isKindOfClass:sQueueClass]) {
         holdContentPop(self, YES);
+        installSwiper((DZRQueueListViewController *)self);
         logQueueState((DZRQueueListViewController *)self);
     }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
-    if (sQueueClass && [self isKindOfClass:sQueueClass]) holdContentPop(self, NO);
+    if (sQueueClass && [self isKindOfClass:sQueueClass]) {
+        holdContentPop(self, NO);
+        UITableView *tv = [(DZRQueueListViewController *)self tableView];
+        DZRowSwiper *s = [tv isKindOfClass:[UITableView class]] ? objc_getAssociatedObject(tv, kDZSwiperKey) : nil;
+        [s closeAnimated:NO];
+    }
 }
 
 %end
@@ -340,11 +616,13 @@ void DZPlayerExtrasInstall(void) {
     dispatch_once(&once, ^{
         Class queue = objc_getClass("DZRQueueListViewController");
         if (implements(queue, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:)) &&
-            implements(queue, @selector(tableView:editingStyleForRowAtIndexPath:)) && implements(queue, @selector(canDeleteRowAtIndexPath:))) {
+            implements(queue, @selector(canDeleteRowAtIndexPath:)) && implements(queue, @selector(deleteRowInTableView:atIndexPath:)) &&
+            implements(queue, @selector(tableView))) {
             sQueueClass = queue;
             %init(DZQueueSwipeHooks);
             %init(DZQueueLeaveHooks);
-            DZLog("player: up next rows delete on a swipe to the right too");
+            if (implements(objc_getClass("DZRPlayerTrackCell"), @selector(prepareForReuse))) %init(DZQueueCellHooks);
+            DZLog("player: up next rows delete on a swipe to the right");
         } else {
             DZLog("player: DZRQueueListViewController not as expected, no swipe-right delete");
         }
