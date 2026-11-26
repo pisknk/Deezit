@@ -33,6 +33,7 @@ Deezit_FILES = Tweak.x \
 	DZProbes.x \
 	DZPlayerMenu.x \
 	DZPlayerExtras.x \
+	DZPlayerButtons.x \
 	DZPlayerArtwork.x \
 	DZLyrics.x \
 	DZDeezerSettings.x \

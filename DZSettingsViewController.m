@@ -461,7 +461,7 @@ static NSInteger singModelInUse(void) {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"AutoMix";
-            cfg.image = [UIImage systemImageNamed:@"shuffle"];
+            cfg.image = [UIImage systemImageNamed:@"arrow.triangle.merge"];
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(kDZAutoMix);

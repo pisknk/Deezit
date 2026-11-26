@@ -22,6 +22,7 @@
 void DZProbesInstall(void);     // DZProbes.x
 void DZPlayerMenuInstall(void); // DZPlayerMenu.x
 void DZPlayerExtrasInstall(void);  // DZPlayerExtras.x
+void DZPlayerButtonsInstall(void); // DZPlayerButtons.x
 void DZPlayerArtworkInstall(void); // DZPlayerArtwork.x
 void DZLyricsInstall(void);        // DZLyrics.x
 void DZDeezerSettingsInstall(void); // DZDeezerSettings.x
@@ -47,6 +48,7 @@ void DZDeezerSettingsInstall(void); // DZDeezerSettings.x
         DZProbesInstall();
         DZPlayerMenuInstall();
         DZPlayerExtrasInstall();
+        DZPlayerButtonsInstall();
         DZPlayerArtworkInstall();
         DZLyricsInstall();
         DZDeezerSettingsInstall();

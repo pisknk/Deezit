@@ -182,9 +182,13 @@ for songs both know, Deezit's analysis next to Apple's.
 - **Artist · album line:** opens a native menu, "Go to <artist>" (each
   artist when there are several) and "Go to <album>", through Deezer's own
   `dzrGoToArtist:` / `dzrGoToAlbum:`.
-- **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`). Tap:
-  lead vocals to 0 % with the backing vocals kept; tap again to undo. Touch
-  and hold: the Karaoke Mode sheet.
+- **Player buttons** (`DZPlayerButtons.x`): Slowed + Reverb, Karaoke Mode
+  and AutoMix next to Share, in Deezer's own `DZRPlayerButton` (its dot shows
+  what's on). Tap: on / off; touch and hold: the feature's sheet.
+- **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`): a
+  "Karaoke Mode" pill that shrinks to a round icon. Tap: lead vocals to 0 %
+  with the backing vocals kept; tap again to undo. Touch and hold: the
+  Karaoke Mode sheet.
 - **Word by word:** Deezer's lyrics are timed per line only
   (`LyricsSynchronizedLineFields { lrcTimestamp line lineTranslated
   milliseconds duration }`, read from its GraphQL reply). Deezit spreads each

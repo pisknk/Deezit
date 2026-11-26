@@ -35,6 +35,7 @@
 #import "DZSettingsViewController.h"
 #import "DZVocalModel.h"
 #import "DZDemucsModel.h"
+#import "DZQuickActions.h"
 
 // placeholders; %init binds them to Deezer.LyricsViewController and
 // Apollo.URLSessionClient (Swift class names can't be written in %hook)
@@ -42,8 +43,6 @@
 @end
 @interface DZApolloClient : NSObject
 @end
-
-static NSString *const kDZPrevBackingKey = @"karaokeTapPrevBacking";
 
 static id kv(id o, NSString *key) {
     if (!o || ![o respondsToSelector:NSSelectorFromString(key)]) return nil;
@@ -405,24 +404,41 @@ static void *kAnimatorKey = &kAnimatorKey;
 
 #pragma mark - Karaoke Mode button
 
-static BOOL singReady(void) {
-    return DZVocalModelGetState() == DZVocalModelReady || DZLabModelInstalled(kDZLabMDX);
-}
-
-@interface DZKaraokeButton : UIButton
+// A pill, "🎤 Karaoke Mode", when the lyrics open, that shrinks to a round
+// icon button after a few seconds. Off: translucent with a white icon; on:
+// white with a dark icon. Tap: karaoke on / off; touch and hold: the sheet.
+@interface DZKaraokeButton : UIControl
 @property (nonatomic, weak) UIViewController *host;
+@property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UILabel *label;
+@property (nonatomic) BOOL expanded;
 @end
 
 @implementation DZKaraokeButton
 
+static const CGFloat kDZPillH = 44, kDZPillPadL = 14, kDZPillPadR = 18, kDZPillGap = 7;
+
 + (instancetype)buttonForHost:(UIViewController *)host {
-    DZKaraokeButton *b = [self buttonWithType:UIButtonTypeSystem];
+    DZKaraokeButton *b = [[self alloc] initWithFrame:CGRectMake(0, 0, kDZPillH, kDZPillH)];
     b.host = host;
+    b.clipsToBounds = YES;
+    b.icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"music.mic"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold]]];
+    b.icon.contentMode = UIViewContentModeCenter;
+    b.label = [UILabel new];
+    b.label.text = @"Karaoke Mode";
+    b.label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    [b.label sizeToFit];
+    for (UIView *v in @[b.icon, b.label]) {
+        v.userInteractionEnabled = NO;
+        [b addSubview:v];
+    }
+    b.isAccessibilityElement = YES;
     b.accessibilityLabel = @"Karaoke Mode";
+    b.accessibilityTraits = UIAccessibilityTraitButton;
     b.accessibilityHint = @"Removes the lead vocals. Touch and hold for options.";
     [b addTarget:b action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:b action:@selector(held:)];
-    [b addGestureRecognizer:lp];
+    [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:b action:@selector(held:)]];
     [[NSNotificationCenter defaultCenter] addObserver:b selector:@selector(refresh) name:DZPrefsChangedNotification object:nil];
     [b refresh];
     return b;
@@ -432,51 +448,62 @@ static BOOL singReady(void) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (BOOL)isOn {
-    return singReady() && DZPrefFloat(kDZVocals) < 0.995f;
+- (CGFloat)preferredWidth {
+    if (!self.expanded) return kDZPillH;
+    return kDZPillPadL + 22 + kDZPillGap + self.label.bounds.size.width + kDZPillPadR;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = self.bounds.size.height;
+    self.layer.cornerRadius = h / 2;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
+    CGFloat iconX = self.expanded ? kDZPillPadL + 11 : self.bounds.size.width / 2;
+    self.icon.center = CGPointMake(iconX, h / 2);
+    self.icon.bounds = CGRectMake(0, 0, 24, 24);
+    CGRect lf = self.label.frame;
+    lf.origin = CGPointMake(kDZPillPadL + 22 + kDZPillGap, (h - lf.size.height) / 2);
+    self.label.frame = lf;
+    self.label.alpha = self.expanded ? 1 : 0;
 }
 
 - (void)refresh {
-    BOOL on = [self isOn];
-    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightRegular];
-    [self setImage:[UIImage systemImageNamed:on ? @"music.mic.circle.fill" : @"music.mic" withConfiguration:cfg]
-          forState:UIControlStateNormal];
+    BOOL on = DZKaraokeIsOn();
+    UIColor *fg = on ? [UIColor colorWithRed:27 / 255.0 green:1 / 255.0 blue:30 / 255.0 alpha:1] : UIColor.whiteColor;
+    self.backgroundColor = on ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.16];
+    self.icon.tintColor = fg;
+    self.label.textColor = fg;
     self.accessibilityValue = on ? @"On" : @"Off";
 }
 
-- (void)openSheet {
-    UIViewController *host = self.host;
-    while (host.presentedViewController && !host.presentedViewController.isBeingDismissed) host = host.presentedViewController;
-    if (host.view.window) [host presentViewController:[DZSettingsViewController karaokeController] animated:YES completion:nil];
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    [UIView animateWithDuration:0.15 animations:^{
+        self.transform = highlighted ? CGAffineTransformMakeScale(0.94, 0.94) : CGAffineTransformIdentity;
+    }];
 }
 
 - (void)tapped {
-    if (!singReady()) {
-        [self openSheet];
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    if (!DZSingReady()) {
+        DZPresentSheet(self.host, DZSheetKaraoke);   // says how to get a vocal model
         return;
     }
-    if ([self isOn]) {
-        float prev = DZPrefFloat(kDZPrevBackingKey);
-        DZPrefSetMany(@{ kDZVocals: @1.0f, kDZBackingVocals: @(prev) });
-        DZLog("lyrics: Karaoke Mode off");
-    } else {
-        DZPrefSetMany(@{ kDZPrevBackingKey: @(DZPrefFloat(kDZBackingVocals)), kDZVocals: @0.0f, kDZBackingVocals: @1.0f });
-        DZLog("lyrics: Karaoke Mode on (lead vocals 0 %%, backing vocals kept)");
-    }
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    DZKaraokeToggle();
+    [self refresh];
 }
 
 - (void)held:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-    [self openSheet];
+    DZPresentSheet(self.host, DZSheetKaraoke);
 }
 
 @end
 
 static void *kKaraokeButtonKey = &kKaraokeButtonKey;
 
-// Bottom left, mirroring Deezer's share button (same size, height and colour).
+// Bottom left, mirroring Deezer's share button (same height and margin).
 static void layoutKaraokeButton(UIViewController *vc) {
     UIView *share = kv(vc, @"sharingButton");
     if (![share isKindOfClass:[UIView class]] || !share.superview) return;
@@ -492,12 +519,36 @@ static void layoutKaraokeButton(UIViewController *vc) {
         [container addSubview:b];
     }
     CGRect f = share.frame;
-    CGFloat w = MAX(44, f.size.width), h = MAX(44, f.size.height);
     CGFloat gap = container.bounds.size.width - CGRectGetMaxX(f);
-    b.frame = CGRectMake(gap - (w - f.size.width) / 2, CGRectGetMidY(f) - h / 2, w, h);
-    b.tintColor = share.tintColor;
+    gap = MAX(12, gap - (kDZPillH - MIN(kDZPillH, f.size.width)) / 2);
+    b.frame = CGRectMake(gap, CGRectGetMidY(f) - kDZPillH / 2, [b preferredWidth], kDZPillH);
     b.hidden = share.hidden;
     b.alpha = share.alpha;
+}
+
+// The lyrics just opened: show the pill, then shrink it to the icon.
+static void showKaraokePill(UIViewController *vc) {
+    DZKaraokeButton *b = objc_getAssociatedObject(vc, kKaraokeButtonKey);
+    if (!b) return;
+    b.expanded = YES;
+    layoutKaraokeButton(vc);
+    [b setNeedsLayout];
+    [b layoutIfNeeded];
+    __weak DZKaraokeButton *weakB = b;
+    __weak UIViewController *weakVC = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DZKaraokeButton *bb = weakB;
+        UIViewController *v = weakVC;
+        if (!bb || !v || !bb.expanded) return;
+        [UIView animateWithDuration:0.55 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            bb.expanded = NO;
+            layoutKaraokeButton(v);
+            [bb setNeedsLayout];
+            [bb layoutIfNeeded];
+        } completion:nil];
+    });
 }
 
 #pragma mark - hooks
@@ -515,6 +566,7 @@ static void layoutKaraokeButton(UIViewController *vc) {
         objc_setAssociatedObject(self, kAnimatorKey, a, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [a start];
+    if (objc_getAssociatedObject(self, kKaraokeButtonKey)) showKaraokePill(self);   // opened again
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -524,7 +576,9 @@ static void layoutKaraokeButton(UIViewController *vc) {
 
 - (void)viewDidLayoutSubviews {
     %orig;
+    BOOL first = objc_getAssociatedObject(self, kKaraokeButtonKey) == nil;
     layoutKaraokeButton(self);
+    if (first && objc_getAssociatedObject(self, kKaraokeButtonKey)) showKaraokePill(self);
 }
 
 %end
