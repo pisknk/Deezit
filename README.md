@@ -26,7 +26,7 @@ generator (plain ObjC runtime).
 | ••• menu row | **working**: "Playback Controls" and "Karaoke Mode" as the first options of the full-screen player's ••• menu |
 | Sing (AI vocal removal) | **working**, in ••• → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
 | AutoMix | **new, untested on a phone**: per-pair crossfades from Apple Music's analysis and Deezit's own, in ••• → Playback Controls |
-| Player extras | **new, untested on a phone**: swipe right to delete in Up next; artist · album opens a Go to artist / album menu |
+| Player extras | **new, untested on a phone**: swipe left or right to delete in Up next; artist · album opens a Go to artist / album menu |
 | Lyrics | **new, untested on a phone**: Karaoke Mode button (tap: lead vocals off; hold: options); word-by-word highlight (estimated within Deezer's line timing) |
 | Animated cover in the player | **new, untested on a phone**: Apple Music motion cover inside the player's cover square |
 | Debug panel + in-app log | done (three-finger double tap) |
@@ -223,8 +223,14 @@ Deezit's analysis next to Apple's.
 
 ## Player and lyrics extras
 
-- **Up next:** Deezer deletes a row on a swipe to the left; Deezit adds the
-  same Delete on a swipe to the right (`DZPlayerExtras.x`).
+- **Up next:** Deezer offers Delete on a swipe to the left only in its own
+  delete mode. Deezit lets every row Deezer can delete (the queue is
+  editable and it isn't the song playing) be swiped at any time, to the left
+  or to the right (`DZPlayerExtras.x`). iOS turns the table's editing on
+  while a row is swiped, so the delete style doesn't depend on it. Each time
+  Up next appears the log says whether the queue is editable, whether the
+  next row offers Delete and which pan gestures sit above the table; a
+  swipe logs "swipe opened" / "swipe closed".
 - **Artist · album line:** opens a native menu, "Go to <artist>" (each
   artist when there are several) and "Go to <album>", through Deezer's own
   `dzrGoToArtist:` / `dzrGoToAlbum:`.
@@ -306,7 +312,7 @@ DZSongAnalysis.*            song analysis (beats, bars, music start / end), Appl
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
-DZPlayerExtras.x            Up next swipe-right delete, artist · album menu
+DZPlayerExtras.x            Up next swipe delete, artist · album menu
 DZPlayerArtwork.x           animated cover inside the player's cover square
 DZLyrics.x                  lyrics: Karaoke Mode button, word-by-word highlight
 DZDeezerSettings.x          "Deezit" card in Deezer's own Settings page

@@ -1,10 +1,12 @@
 // Two small changes to Deezer's player screens.
 //
-// 1. Up next (DZRQueueListViewController, a UITableViewController): Deezer
-//    offers Delete on a swipe to the left (its
+// 1. Up next (DZRQueueListViewController, a DZRCommonTableViewController):
+//    Deezer offers Delete on a swipe to the left only in its delete mode (the
+//    bar button that calls -displayDeleteButtons); its
 //    -tableView:trailingSwipeActionsConfigurationForRowAtIndexPath: builds a
-//    contextual action that calls -deleteRowInTableView:atIndexPath:). Deezit
-//    offers the same action on a swipe to the right.
+//    contextual action that calls -deleteRowInTableView:atIndexPath:. Deezit
+//    lets every row Deezer can delete be swiped at any time, to the left or to
+//    the right.
 //
 // 2. The artist · album line under the title (DZRPlayerMainViewController):
 //    Deezer's -didTapPlayerArtistAlbumButton opens the artist
@@ -20,8 +22,12 @@
 #import "DZLog.h"
 
 @interface DZRQueueListViewController : UIViewController
+- (UITableView *)tableView;
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip;
 - (BOOL)canDeleteRowAtIndexPath:(NSIndexPath *)ip;
+- (BOOL)canEditQueueList;
+- (BOOL)isDeleting;
+- (NSUInteger)currentTrackIndex;
 @end
 
 @interface DZRPlayerMainViewController : UIViewController
@@ -174,6 +180,61 @@ static void holdContentPop(UIViewController *vc, BOOL hold) {
 
 static Class sQueueClass;
 
+static NSString *yn(BOOL b) { return b ? @"yes" : @"no"; }
+
+// Pan gestures from the table up to the window, which could take a row's
+// swipe (the table's own scroll pan is listed as well).
+static NSString *pansAbove(UIView *table) {
+    NSMutableArray *out = [NSMutableArray array];
+    int depth = 0;
+    for (UIView *v = table; v && depth < 16; v = v.superview, depth++) {
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            NSString *cls = NSStringFromClass([g class]);
+            if (![g isKindOfClass:[UIPanGestureRecognizer class]] && [cls rangeOfString:@"Swipe" options:NSCaseInsensitiveSearch].location == NSNotFound)
+                continue;
+            [out addObject:[NSString stringWithFormat:@"%@%@ on %@", cls, g.enabled ? @"" : @" (off)",
+                            v == table ? @"table" : NSStringFromClass([v class])]];
+        }
+    }
+    return out.count ? [out componentsJoinedByString:@", "] : @"none";
+}
+
+// One line when Up next appears (only when it differs from the last one), so
+// a log shows whether Deezer allows deleting and what could take the swipe.
+static void logQueueState(DZRQueueListViewController *vc) {
+    UITableView *tv = [vc respondsToSelector:@selector(tableView)] ? [vc tableView] : nil;
+    if (![tv isKindOfClass:[UITableView class]]) {
+        DZLog("up next: no table view");
+        return;
+    }
+    NSInteger rows = tv.numberOfSections ? [tv numberOfRowsInSection:0] : 0;
+    NSInteger playing = [vc respondsToSelector:@selector(currentTrackIndex)] ? (NSInteger)[vc currentTrackIndex] : -1;
+    NSInteger probe = playing + 1 < rows ? playing + 1 : (rows > 0 && playing != 0 ? 0 : -1);
+    NSString *row = @"no row besides the playing one";
+    if (probe >= 0) {
+        NSIndexPath *ip = [NSIndexPath indexPathForRow:probe inSection:0];
+        BOOL can = [vc canDeleteRowAtIndexPath:ip];
+        BOOL offered = [vc tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip] != nil;
+        NSInteger style = [(id<UITableViewDelegate>)vc tableView:tv editingStyleForRowAtIndexPath:ip];
+        row = [NSString stringWithFormat:@"row %ld deletable %@, style %ld, Delete offered %@", (long)probe, yn(can), (long)style, yn(offered)];
+    }
+    UIGestureRecognizer *pop = contentPop(vc);
+    NSString *line = [NSString stringWithFormat:
+        @"up next: %ld rows, playing row %ld · queue editable %@, delete mode %@ · %@ · table editing %@, delegate %@, data source %@ · content swipe back %@ · %lu screens deep · pans: %@",
+        (long)rows, (long)playing,
+        [vc respondsToSelector:@selector(canEditQueueList)] ? yn([vc canEditQueueList]) : @"?",
+        [vc respondsToSelector:@selector(isDeleting)] ? yn([vc isDeleting]) : @"?",
+        row, yn(tv.isEditing),
+        tv.delegate == (id)vc ? @"Up next" : NSStringFromClass([(id)tv.delegate class]),
+        tv.dataSource == (id)vc ? @"Up next" : NSStringFromClass([(id)tv.dataSource class]),
+        pop ? (pop.enabled ? @"on" : @"off") : @"none",
+        (unsigned long)vc.navigationController.viewControllers.count, pansAbove(tv)];
+    static NSString *last;
+    if ([line isEqualToString:last]) return;
+    last = line;
+    DZLog("%@", line);
+}
+
 #pragma mark - hooks
 
 %group DZQueueSwipeHooks
@@ -185,14 +246,14 @@ static Class sQueueClass;
     holdContentPop(self, YES);
 }
 
-// Outside Edit mode Deezer answers "no editing style" for every row
-// (canDeleteRowAtIndexPath: && isDeleting), and iOS then shows no swipe
-// actions at all. Rows Deezer can delete (canDeleteRowAtIndexPath:: the queue
-// is editable and it isn't the song playing) get the delete style, so both
-// swipes work; Edit mode keeps Deezer's own answer.
+// Deezer gives a row the delete style only in its own delete mode (its bar
+// button's -displayDeleteButtons: canDeleteRowAtIndexPath: && isDeleting), and iOS shows no
+// swipe actions on a row without it. Rows Deezer can delete (the queue is
+// editable and it isn't the song playing) now always get it. This can't
+// depend on tableView.isEditing: iOS turns editing on while a row is being
+// swiped, so the old "!isEditing" check took the style away mid-swipe.
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tv editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
-    if (!tv.isEditing && [self respondsToSelector:@selector(canDeleteRowAtIndexPath:)] && [self canDeleteRowAtIndexPath:ip])
-        return UITableViewCellEditingStyleDelete;
+    if ([self canDeleteRowAtIndexPath:ip]) return UITableViewCellEditingStyleDelete;
     return %orig;
 }
 
@@ -202,14 +263,36 @@ static Class sQueueClass;
     return [self tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip];
 }
 
+// iOS calls these as a row's swipe actions open and close (Deezer has
+// neither); a swipe that never logs "opened" never started
+%new
+- (void)tableView:(UITableView *)tv willBeginEditingRowAtIndexPath:(NSIndexPath *)ip {
+    DZLog("up next: swipe opened on row %ld (deletable %@)", (long)ip.row, yn([self canDeleteRowAtIndexPath:ip]));
+}
+
+%new
+- (void)tableView:(UITableView *)tv didEndEditingRowAtIndexPath:(NSIndexPath *)ip {
+    DZLog("up next: swipe closed on row %ld", ip ? (long)ip.row : -1L);
+}
+
 %end
 
 %end
 
 %group DZQueueLeaveHooks
 
-// (Up next doesn't override it: hooked on UIViewController, for the queue only)
+// (Up next overrides neither: hooked on UIViewController, for the queue only;
+// Deezer's own viewDidAppear: overrides above it call super)
 %hook UIViewController
+
+// the push may turn the content swipe back on again as it ends
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (sQueueClass && [self isKindOfClass:sQueueClass]) {
+        holdContentPop(self, YES);
+        logQueueState((DZRQueueListViewController *)self);
+    }
+}
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
