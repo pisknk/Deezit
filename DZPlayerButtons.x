@@ -91,8 +91,10 @@ void DZPresentSheet(UIViewController *vc, DZSheet sheet) {
 typedef NS_ENUM(NSInteger, DZQuick) { DZQuickEffect, DZQuickKaraoke, DZQuickAutoMix, DZQuickCount };
 
 // Outline when off, filled when on (like Deezer's heart); the first symbol
-// this iOS has wins.
+// this iOS has wins. The tortoise is about twice as wide as it is tall, so it
+// is drawn smaller to sit in the row like the other icons.
 static UIImage *quickImage(DZQuick q, BOOL on, CGFloat point) {
+    if (q == DZQuickEffect) point = round(point * 0.8);
     NSArray<NSString *> *names;
     switch (q) {
         case DZQuickEffect: names = on ? @[@"tortoise.fill"] : @[@"tortoise"]; break;
@@ -127,6 +129,8 @@ static BOOL quickIsOn(DZQuick q) {
 @property (nonatomic, weak) DZRPlayerTrackActionsController *controller;
 @property (nonatomic, strong) NSArray<UIButton *> *buttons;
 @property (nonatomic) CGFloat point;
+@property (nonatomic, weak) UIButton *sizedLike;                      // the share button they're sized like
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *sizeMatch;
 - (void)syncLook;
 @end
 
@@ -269,6 +273,46 @@ static void *kDZShareMirrorKey = &kDZShareMirrorKey;   // Deezer's share button 
 
 static void *kDZQuickKey = &kDZQuickKey;
 
+// Deezer's row is Share, a spacer, then its buttons on the right. With three
+// more after Share the spacer squeezed them, so the spacing came out uneven:
+// the spacer is hidden, the row spaced evenly, and the new buttons get the
+// share button's size, so every icon is the same distance from the next.
+static void evenRow(UIStackView *stack, DZQuickButtons *q, UIButton *share) {
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    for (UIView *v in stack.arrangedSubviews) {
+        // only a plain empty view: anything else may be one of Deezer's buttons
+        if (!v.hidden && [v class] == [UIView class] && v.subviews.count == 0) {
+            v.hidden = YES;
+            [hidden addObject:NSStringFromClass([v class])];
+        }
+    }
+    UIStackViewDistribution was = stack.distribution;
+    if (was != UIStackViewDistributionEqualSpacing) stack.distribution = UIStackViewDistributionEqualSpacing;
+    if (share && (q.sizedLike != share || !q.sizeMatch.firstObject.isActive)) {
+        if (q.sizeMatch) [NSLayoutConstraint deactivateConstraints:q.sizeMatch];
+        NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+        for (UIButton *b in q.buttons) {
+            NSLayoutConstraint *w = [b.widthAnchor constraintEqualToAnchor:share.widthAnchor];
+            w.priority = UILayoutPriorityRequired - 1;
+            [cs addObject:w];
+        }
+        [NSLayoutConstraint activateConstraints:cs];
+        q.sizeMatch = cs;
+        q.sizedLike = share;
+    }
+    static BOOL logged;
+    if (!logged) {
+        logged = YES;
+        NSMutableArray<NSString *> *row = [NSMutableArray array];
+        for (UIView *v in stack.arrangedSubviews)
+            [row addObject:[NSString stringWithFormat:@"%@%@ %.0f", NSStringFromClass([v class]), v.hidden ? @" (hidden)" : @"",
+                            v.bounds.size.width]];
+        DZLog("player: row spaced evenly (distribution was %ld, spacing %.0f, share %.0f wide; spacer hidden: %@) · %@",
+              (long)was, stack.spacing, share.bounds.size.width, hidden.count ? @"yes" : @"none found",
+              [row componentsJoinedByString:@", "]);
+    }
+}
+
 // Puts the buttons back right after Share (Deezer has just rebuilt the row).
 static void placeButtons(DZRPlayerTrackActionsController *c) {
     UIStackView *stack = [c respondsToSelector:@selector(stackView)] ? [c stackView] : nil;
@@ -290,6 +334,7 @@ static void placeButtons(DZRPlayerTrackActionsController *c) {
         b.hidden = NO;
         [stack insertArrangedSubview:b atIndex:idx++];
     }
+    evenRow(stack, q, share);
     [q refresh];
 }
 

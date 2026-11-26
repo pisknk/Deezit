@@ -462,8 +462,9 @@ static double barOf(DZSongInfo *a, double at, double beat) {
 
 // Picks the transition for A then B, its overlap (s) and B's tempo plan:
 //   bass swap  tempos within 10 % (half / double time counts; 6 % without
-//              tempo matching): B comes in 2-8 bars before A's phrase without
-//              bass, the bass changes hands on A's bar line, A fades over 2 bars
+//              tempo matching): B comes in 2-8 bars (at most ~17 s) before A's
+//              phrase without bass, the bass changes hands on A's bar line, A
+//              fades over 2 bars
 //   echo out   A has bars: A's last beats echo, A drops out on B's first downbeat
 //   filter fade otherwise
 // While they overlap B plays at A's tempo, then eases back to its own over a
@@ -504,7 +505,8 @@ static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZF
     fx->durationA = dur;
     fx->beatA = beatA;
     fx->ownGainA = sHoldReady;
-    NSString *tempo = rate != 1.0 ? [NSString stringWithFormat:@", B at %.1f %% speed", 100 / rate] : @"";
+    // rate is B's frames per frame heard: B plays at rate x its speed
+    NSString *tempo = rate != 1.0 ? [NSString stringWithFormat:@", B at %.1f %% speed", 100 * rate] : @"";
     NSString *where = phrase ? @"phrase" : @"bar";
 
     // bass swap
@@ -515,8 +517,9 @@ static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZF
             int n = ns[k];
             if (firstB + n >= b.bars.count) continue;
             double swapB = b.bars[firstB + n].doubleValue;
-            if (swapB > 30) continue;
             double heardB = swapB / rate;   // B's lead-in as heard
+            // at most ~17 s of B under A (8 bars at 120 bpm; 4 at 70)
+            if (heardB > 17) continue;
             double swap = land.doubleValue;
             where = phrase ? @"phrase" : @"bar";
             double d = dur - (swap - heardB);
@@ -635,7 +638,7 @@ static void joinChange(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t0) {
     }
     DZLog("automix: \"%@\" comes in %.0f ms ahead, padded%@", l.title, tr.early * 1000,
           l.stretch ? [NSString stringWithFormat:@", at %.1f %% speed until %.1f s, its own tempo from %.1f s",
-                       100 / tr.stretchRate, tr.glideFrom, tr.glideTo] : @"");
+                       100 * tr.stretchRate, tr.glideFrom, tr.glideTo] : @"");
 }
 
 static void applyTransition(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t0) {

@@ -172,7 +172,8 @@ schedules on the two songs' player nodes (about 3 s ahead, by song position),
 so a change is more than a volume crossfade. Per pair it picks:
 
 - **bass swap** when the tempos are within 10 % (half / double time counts;
-  6 % with tempo matching off): B comes in 2-8 bars early without bass, then
+  6 % with tempo matching off): B comes in 2-8 bars early (at most about
+  17 s) without bass, then
   on A's bar line A's bass is pulled out and B's drops in, and A fades out
   over 2 bars;
 - **echo out** when A has bars: A's last beats repeat on a ¾-beat echo with

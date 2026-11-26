@@ -272,6 +272,21 @@ static NSInteger singModelInUse(void) {
     return NO;
 }
 
+// The sections this page shows, in order. Hidden ones aren't in the table at
+// all: an empty section still leaves its header and footer space (the empty
+// stretch in the sheets). Table section indexes map to DZSection through this.
+- (NSArray<NSNumber *> *)visibleSections {
+    NSMutableArray<NSNumber *> *v = [NSMutableArray array];
+    for (NSInteger s = 0; s < DZSectionCount; s++)
+        if ([self shows:s]) [v addObject:@(s)];
+    return v;
+}
+
+- (NSInteger)kindAt:(NSInteger)index {
+    NSArray<NSNumber *> *v = [self visibleSections];
+    return index >= 0 && index < (NSInteger)v.count ? v[index].integerValue : -1;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.pageTitle ?: @"Deezit";
@@ -306,7 +321,15 @@ static NSInteger singModelInUse(void) {
     [self.navigationController dismissViewControllerAnimated:YES completion:nil];
 }
 
-- (void)reload:(NSIndexSet *)sections {
+// `kinds` are DZSection values; the ones this page doesn't show are skipped.
+- (void)reload:(NSIndexSet *)kinds {
+    NSArray<NSNumber *> *v = [self visibleSections];
+    NSMutableIndexSet *sections = [NSMutableIndexSet indexSet];
+    [kinds enumerateIndexesUsingBlock:^(NSUInteger k, BOOL *stop) {
+        NSUInteger i = [v indexOfObject:@(k)];
+        if (i != NSNotFound) [sections addIndex:i];
+    }];
+    if (!sections.count || !self.isViewLoaded) return;
     [UIView performWithoutAnimation:^{
         [self.tableView reloadSections:sections withRowAnimation:UITableViewRowAnimationNone];
     }];
@@ -343,10 +366,11 @@ static NSInteger singModelInUse(void) {
 
 #pragma mark table data
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return DZSectionCount; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return (NSInteger)[self visibleSections].count; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    if (![self shows:section]) return 0;
+    section = [self kindAt:section];
+    if (section < 0) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
         case DZSectionAutoMix: return 2;   // AutoMix, Tempo matching
@@ -371,7 +395,8 @@ static NSInteger singModelInUse(void) {
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    if (![self shows:section]) return nil;
+    section = [self kindAt:section];
+    if (section < 0) return nil;
     switch (section) {
         case DZSectionSing: return @"Sing";
         case DZSectionPresets: return @"Presets";
@@ -387,7 +412,8 @@ static NSInteger singModelInUse(void) {
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
-    if (![self shows:section]) return nil;
+    section = [self kindAt:section];
+    if (section < 0) return nil;
     switch (section) {
         case DZSectionEffect:
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
@@ -446,7 +472,7 @@ static NSInteger singModelInUse(void) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    switch (ip.section) {
+    switch ([self kindAt:ip.section]) {
         case DZSectionEffect: {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
@@ -752,13 +778,14 @@ static NSInteger singModelInUse(void) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section == DZSectionPresets) {
+    NSInteger kind = [self kindAt:ip.section];
+    if (kind == DZSectionPresets) {
         DZApplyPreset(DZAllPresets()[ip.row]);
         [self reloadSliders];
-    } else if (ip.section == DZSectionReset) {
+    } else if (kind == DZSectionReset) {
         DZPrefsResetAudio();
         [self reloadSliders];
-    } else if (ip.section == DZSectionModel && ip.row == 1) {
+    } else if (kind == DZSectionModel && ip.row == 1) {
         switch (DZVocalModelGetState()) {
             case DZVocalModelNotInstalled:
             case DZVocalModelFailed: DZVocalModelDownload(); break;
@@ -766,7 +793,7 @@ static NSInteger singModelInUse(void) {
             case DZVocalModelReady: [self confirmDeleteModel]; break;
             case DZVocalModelCompiling: break;
         }
-    } else if (ip.section == DZSectionDemucs && ip.row == 1) {
+    } else if (kind == DZSectionDemucs && ip.row == 1) {
         switch (DZDemucsGetState()) {
             case DZDemucsNotInstalled:
             case DZDemucsFailed: DZDemucsDownload(); break;
@@ -774,7 +801,7 @@ static NSInteger singModelInUse(void) {
             case DZDemucsReady: DZDemucsDelete(); break;
             case DZDemucsPreparing: break;
         }
-    } else if (ip.section == DZSectionDemucs && ip.row == 2) {
+    } else if (kind == DZSectionDemucs && ip.row == 2) {
         DZDemucsRunBenchmark();
     }
 }
