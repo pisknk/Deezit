@@ -1000,9 +1000,17 @@ AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBu
             if ([mixable respondsToSelector:@selector(track)]) isrc = isrcOf([(DZRAudioTrackController *)mixable track]);
             if ([mixable respondsToSelector:@selector(elapsedDuration)]) elapsed = [(DZRAudioTrackController *)mixable elapsedDuration];
         } @catch (NSException *e) {}
-        if (tr && !tr.natural && (!isrc || [isrc isEqualToString:tr.isrcA])) {
-            double early = elapsed >= 0 && isrc ? tr.fx.start - elapsed : kStartPad - 0.04;
-            BOOL misaligned = early < -0.03 || early > kStartPad + 0.15;
+        // only a change from the planned A: when a new song is picked Deezer
+        // fades the old one out too, from a controller that may no longer say
+        // which track it was (its clock back at 0). Unnamed counts only on time.
+        double early = elapsed >= 0 ? tr.fx.start - elapsed : 0;
+        BOOL onTime = elapsed >= 0 && early >= -0.03 && early <= kStartPad + 0.15;
+        BOOL fromA = isrc ? [isrc isEqualToString:tr.isrcA] && elapsed >= 0 : onTime;
+        if (tr && !tr.natural && !fromA) {
+            DZLog("automix: Deezer fades out %@ at %.2f s (%.1f s) instead of changing from \"%@\" (a song picked?): no transition",
+                  isrc ? @"a song" : @"a song it doesn't name", elapsed, duration, tr.titleA);
+        } else if (tr && !tr.natural) {
+            BOOL misaligned = !onTime;
             tr.early = misaligned ? 0 : MAX(0, early);
             tr.misaligned = misaligned;
             tr.naturalAt = CACurrentMediaTime();

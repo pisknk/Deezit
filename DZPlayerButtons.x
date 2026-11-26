@@ -352,8 +352,9 @@ static void *kDZQuickKey = &kDZQuickKey;
 static void evenRow(UIStackView *stack, DZQuickButtons *q, UIButton *share) {
     NSMutableArray<NSString *> *hidden = [NSMutableArray array];
     for (UIView *v in stack.arrangedSubviews) {
-        // only a plain empty view: anything else may be one of Deezer's buttons
-        if (!v.hidden && [v class] == [UIView class] && v.subviews.count == 0) {
+        // the spacer: an empty view that isn't a control (anything with content
+        // may be one of Deezer's buttons)
+        if (!v.hidden && ![v isKindOfClass:[UIControl class]] && v.subviews.count == 0) {
             v.hidden = YES;
             [hidden addObject:NSStringFromClass([v class])];
         }
@@ -372,17 +373,23 @@ static void evenRow(UIStackView *stack, DZQuickButtons *q, UIButton *share) {
         q.sizeMatch = cs;
         q.sizedLike = share;
     }
+    // once, with the full row laid out: every view and where its centre is
     static BOOL logged;
-    if (!logged) {
-        logged = YES;
+    if (logged || !share || stack.arrangedSubviews.count < 5) return;
+    logged = YES;
+    NSString *hiddenNote = hidden.count ? [hidden componentsJoinedByString:@", "] : @"none found";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [stack layoutIfNeeded];
         NSMutableArray<NSString *> *row = [NSMutableArray array];
-        for (UIView *v in stack.arrangedSubviews)
-            [row addObject:[NSString stringWithFormat:@"%@%@ %.0f", NSStringFromClass([v class]), v.hidden ? @" (hidden)" : @"",
-                            v.bounds.size.width]];
-        DZLog("player: row spaced evenly (distribution was %ld, spacing %.0f, share %.0f wide; spacer hidden: %@) · %@",
-              (long)was, stack.spacing, share.bounds.size.width, hidden.count ? @"yes" : @"none found",
-              [row componentsJoinedByString:@", "]);
-    }
+        for (UIView *v in stack.arrangedSubviews) {
+            NSString *name = v == share ? @"share" : [q.buttons containsObject:(UIButton *)v] ? quickName(v.tag) : NSStringFromClass([v class]);
+            [row addObject:v.hidden ? [name stringByAppendingString:@" (hidden)"]
+                                    : [NSString stringWithFormat:@"%@ %.0f wide at %.0f", name, v.frame.size.width, CGRectGetMidX(v.frame)]];
+        }
+        DZLog("player: row spaced evenly (distribution was %ld, spacing %.0f; spacer hidden: %@) · %@",
+              (long)was, stack.spacing, hiddenNote, [row componentsJoinedByString:@", "]);
+    });
+}
 }
 
 // Puts the buttons back right after Share (Deezer has just rebuilt the row).
