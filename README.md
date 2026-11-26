@@ -50,7 +50,7 @@ Gestures, anywhere in Deezer:
 
 | Gesture | Opens |
 |---|---|
-| **Three-finger hold** | Deezit Settings: Sing model download, model lab (MDX-Net), lock-screen covers |
+| **Deezer → Settings → Deezit** (card under Log out) or **three-finger hold** | Deezit Settings: Sing model download, model lab (MDX-Net), native ••• menu, animated covers, lyrics |
 | **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
 
 The first launch of each Deezit version shows a short banner to confirm the
@@ -252,6 +252,7 @@ DZPlayerMenu.x              "Playback Controls" row in the player's ••• me
 DZPlayerExtras.x            Up next swipe-right delete, artist · album menu
 DZPlayerArtwork.x           animated cover inside the player's cover square
 DZLyrics.x                  lyrics: Karaoke Mode button, word-by-word highlight
+DZDeezerSettings.x          "Deezit" card in Deezer's own Settings page
 DZLockArtwork.x             animated lock-screen cover (now-playing hook)
 DZAppleMusic.*              Apple Music album match + motion-cover lookup
 DZMotionFile.*              motion cover HLS -> cached local MP4 + still frame

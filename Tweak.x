@@ -24,6 +24,7 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
 void DZPlayerExtrasInstall(void);  // DZPlayerExtras.x
 void DZPlayerArtworkInstall(void); // DZPlayerArtwork.x
 void DZLyricsInstall(void);        // DZLyrics.x
+void DZDeezerSettingsInstall(void); // DZDeezerSettings.x
 
 // Hooks live in their own files as %group blocks, each %init-ed by its
 // install function: audio in DZAudioHook.x, UI probes in DZProbes.x, the
@@ -48,6 +49,7 @@ void DZLyricsInstall(void);        // DZLyrics.x
         DZPlayerExtrasInstall();
         DZPlayerArtworkInstall();
         DZLyricsInstall();
+        DZDeezerSettingsInstall();
         DZLockArtworkInstall();
         DZSettingsEntryInstall();
     }

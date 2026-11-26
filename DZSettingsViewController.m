@@ -93,9 +93,118 @@ typedef NS_ENUM(NSInteger, DZPage) { DZPageSettings, DZPageControls, DZPageKarao
 @interface DZSettingsViewController ()
 @property (nonatomic, copy) NSString *pageTitle;
 @property (nonatomic) DZPage page;
+@property (nonatomic) BOOL deezerStyle;   // opened from Deezer's own Settings: its colours and header
 @end
 
+// Deezer's Settings page (iOS 27, from a screenshot): background, cards,
+// dividers, secondary text / icons, accent.
+static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:1]; }
+#define kDZDeezerBG dzRGB(27, 1, 30)
+#define kDZDeezerCard dzRGB(40, 6, 41)
+#define kDZDeezerDivider dzRGB(68, 34, 69)
+#define kDZDeezerSecondary dzRGB(210, 177, 211)
+#define kDZDeezerAccent dzRGB(241, 186, 251)
+#define kDZDeezerButton dzRGB(65, 31, 66)
+
 @implementation DZSettingsViewController
+
++ (UIViewController *)deezerSettingsPage {
+    DZSettingsViewController *vc = [[DZSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.page = DZPageSettings;
+    vc.pageTitle = @"Deezit";
+    vc.deezerStyle = YES;
+    return vc;
+}
+
+- (void)applyDeezerStyle {
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.tableView.backgroundColor = kDZDeezerBG;
+    self.tableView.separatorColor = kDZDeezerDivider;
+    self.tableView.tintColor = kDZDeezerAccent;
+    self.view.tintColor = kDZDeezerAccent;
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
+}
+
+// Deezer's Settings draws its own header (a round button and a centred
+// title) with the navigation bar hidden; do the same when it's hidden here.
+- (void)updateDeezerHeader {
+    if (!self.deezerStyle) return;
+    BOOL ownHeader = !self.navigationController || self.navigationController.navigationBarHidden;
+    if (!ownHeader) {
+        self.tableView.tableHeaderView = nil;
+        return;
+    }
+    if (self.tableView.tableHeaderView) return;
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.tableView.bounds.size.width, 72)];
+    UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
+    BOOL pushed = self.navigationController.viewControllers.count > 1 && self.navigationController.topViewController == self;
+    [back setImage:[UIImage systemImageNamed:pushed ? @"chevron.left" : @"xmark"
+                           withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold]]
+          forState:UIControlStateNormal];
+    back.tintColor = UIColor.whiteColor;
+    back.backgroundColor = kDZDeezerButton;
+    back.layer.cornerRadius = 22;
+    back.frame = CGRectMake(16, 14, 44, 44);
+    back.accessibilityLabel = pushed ? @"Back" : @"Close";
+    [back addTarget:self action:@selector(back) forControlEvents:UIControlEventTouchUpInside];
+    UILabel *title = [UILabel new];
+    title.text = self.pageTitle ?: @"Deezit";
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.textColor = UIColor.whiteColor;
+    title.textAlignment = NSTextAlignmentCenter;
+    title.frame = CGRectMake(70, 14, header.bounds.size.width - 140, 44);
+    title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [header addSubview:back];
+    [header addSubview:title];
+    self.tableView.tableHeaderView = header;
+}
+
+- (void)back {
+    UINavigationController *nav = self.navigationController;
+    if (nav.viewControllers.count > 1 && nav.topViewController == self) [nav popViewControllerAnimated:YES];
+    else [(nav ?: (UIViewController *)self) dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self updateDeezerHeader];
+}
+
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    if (!self.deezerStyle) return;
+    cell.backgroundColor = kDZDeezerCard;
+    if ([cell.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
+        UIListContentConfiguration *cfg = (UIListContentConfiguration *)cell.contentConfiguration;
+        cfg.imageProperties.tintColor = kDZDeezerSecondary;
+        cfg.textProperties.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        cfg.secondaryTextProperties.color = kDZDeezerSecondary;
+        cell.contentConfiguration = cfg;
+    }
+    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) ((UISwitch *)cell.accessoryView).onTintColor = kDZDeezerAccent;
+}
+
+- (void)tableView:(UITableView *)tv willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    if (!self.deezerStyle || ![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+    NSString *title = [self tableView:tv titleForHeaderInSection:section];
+    if (!title) return;
+    UIListContentConfiguration *cfg = [UIListContentConfiguration groupedHeaderConfiguration];
+    cfg.text = title;
+    cfg.textProperties.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+    cfg.textProperties.color = kDZDeezerSecondary;
+    cfg.textProperties.transform = UIListContentTextTransformNone;
+    cfg.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(16, 0, 8, 0);
+    ((UITableViewHeaderFooterView *)view).contentConfiguration = cfg;
+}
+
+- (void)tableView:(UITableView *)tv willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    if (!self.deezerStyle || ![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+    NSString *text = [self tableView:tv titleForFooterInSection:section];
+    if (!text) return;
+    UIListContentConfiguration *cfg = [UIListContentConfiguration groupedFooterConfiguration];
+    cfg.text = text;
+    cfg.textProperties.color = [kDZDeezerSecondary colorWithAlphaComponent:0.75];
+    ((UITableViewHeaderFooterView *)view).contentConfiguration = cfg;
+}
 
 + (UIViewController *)presentableController {
     DZSettingsViewController *vc = [[DZSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
@@ -166,10 +275,13 @@ static NSInteger singModelInUse(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.pageTitle ?: @"Deezit";
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                      target:self
-                                                      action:@selector(done)];
+    if (self.deezerStyle) [self applyDeezerStyle];
+    if (!self.deezerStyle || self.navigationController.viewControllers.firstObject == self) {
+        self.navigationItem.rightBarButtonItem =
+            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                          target:self
+                                                          action:@selector(done)];
+    }
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"basic"];
     [self.tableView registerClass:[DZSliderCell class] forCellReuseIdentifier:@"slider"];
     [[NSNotificationCenter defaultCenter] addObserver:self

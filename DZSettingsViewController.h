@@ -11,4 +11,7 @@
 // "Karaoke Mode": the Sing controls (vocals, backing vocals, strength, model),
 // the same kind of sheet, opened from the ••• menu row under Playback Controls.
 + (UIViewController *)karaokeController;
+// The Settings page in Deezer's Settings colours, for pushing onto Deezer's
+// own Settings navigation (not wrapped; draws Deezer's header when the bar is hidden).
++ (UIViewController *)deezerSettingsPage;
 @end

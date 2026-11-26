@@ -35,6 +35,7 @@ Deezit_FILES = Tweak.x \
 	DZPlayerExtras.x \
 	DZPlayerArtwork.x \
 	DZLyrics.x \
+	DZDeezerSettings.x \
 	DZAppleMusic.m \
 	DZMotionFile.m \
 	DZLockArtwork.x \
