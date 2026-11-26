@@ -23,9 +23,8 @@ generator (plain ObjC runtime).
 | Prefs → realtime-safe audio params | done |
 | Audio hook | **working** (tested on iOS 27.0.1): varispeed + Apple Reverb2 spliced in front of Deezer's output node |
 | Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
-| ••• menu row | **working**: "Playback Controls" and "Karaoke Mode" as the first options of the full-screen player's ••• menu |
-| Sing (AI vocal removal) | **working**, in ••• → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
-| AutoMix | **new, untested on a phone**: per-pair crossfades from Apple Music's analysis and Deezit's own, in ••• → Playback Controls |
+| Sing (AI vocal removal) | **working**, hold the Karaoke button → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
+| AutoMix | **new, untested on a phone**: per-pair crossfades from Apple Music's analysis and Deezit's own, hold the AutoMix button |
 | Player extras | **new, untested on a phone**: swipe right to delete in Up next; artist · album opens a Go to artist / album menu |
 | Lyrics | **new, untested on a phone**: Karaoke Mode button (tap: lead vocals off; hold: options); word-by-word highlight (estimated within Deezer's line timing) |
 | Animated cover in the player | **new, untested on a phone**: Apple Music motion cover inside the player's cover square |
@@ -40,17 +39,15 @@ Deezer's audio completely alone.
 
 ## Opening the controls
 
-**Full-screen player → ••• → Playback Controls** opens the sound controls
-(Slowed + Reverb, AutoMix, presets, speed, reverb) as a half-height sheet; **••• → Karaoke
-Mode**, the row under it, opens Sing (vocals, backing vocals, strength, model)
-the same way. Both sheets open
-over the player.
+In the full-screen player, next to Share, **touch and hold** a Deezit button
+for its sheet, a half-height sheet over the player: **Slowed + Reverb** →
+Playback Controls (presets, speed, reverb), **Karaoke** → Karaoke Mode (vocals,
+backing vocals, strength, model), **AutoMix** → AutoMix (AutoMix, Tempo
+matching). A tap turns the feature on or off.
 
-Gestures, anywhere in Deezer:
-
-| Gesture | Opens |
+| Where | Opens |
 |---|---|
-| **Deezer → Settings → Deezit** (card under Log out) or **three-finger hold** | Deezit Settings: Sing model download, model lab (MDX-Net), native ••• menu, animated covers, lyrics |
+| **Deezer → Settings → Deezit** (card under Log out) | Deezit Settings: Sing model download, model lab (MDX-Net), native ••• menu, animated covers, lyrics |
 | **Three-finger double tap** | Debug panel: status, live log, share / copy / clear, audio-hook kill switch |
 
 The first launch of each Deezit version shows a short banner to confirm the
@@ -80,10 +77,10 @@ Then sideload `Deezer-Deezit.ipa` as usual.
 
 ## Sing (AI vocal removal)
 
-1. **Settings** (three-finger hold) → **Sing → Download** fetches the vocal
+1. **Settings → Deezit → Sing → Download** fetches the vocal
    model once (about 40 MB, from this repo's `vocal-model-v1` release) and
    prepares it for the phone's Neural Engine.
-2. **••• → Karaoke Mode → Vocals** sets how much singing is left
+2. **Karaoke Mode → Vocals** (hold the Karaoke button) sets how much singing is left
    (100% = untouched); **Backing vocals** keeps the harmonies that are
    spread left / right and removes only the centred lead; **Strength**
    (Gentle / Normal / Strong) sets how sure the model must be before a sound
@@ -91,7 +88,7 @@ Then sideload `Deezer-Deezit.ipa` as usual.
    half-mistakes for singing (violins, claps, synth leads) alone. Changes
    are heard after about 3 seconds.
 3. Optional: **Settings → Model lab → MDX-Net → Download** (about 14 MB), then
-   **••• → Karaoke Mode → Model → MDX-Net**. UVR's MDX-Net 9482 sees the
+   **Karaoke Mode → Model → MDX-Net**. UVR's MDX-Net 9482 sees the
    whole spectrum (to ~22 kHz) and estimates the vocals themselves, so more of
    the instruments and the highs survive. Switching models restarts Sing for a
    moment, like the start of a track.
@@ -142,7 +139,7 @@ first: on an iPhone 13 it ran entirely on the CPU, 1.1 s per 2.6 s window and
 
 ## AutoMix
 
-**••• → Playback Controls → AutoMix** plans each crossfade from the two songs.
+**AutoMix** (hold the player's AutoMix button) plans each crossfade from the two songs.
 What it builds on, from the AutoMix probe on Deezer 11.27.0:
 
 - Deezer plays the next song on a second player node. With a crossfade of D
@@ -247,13 +244,19 @@ Deezit's analysis next to Apple's.
   evenly. Tap: on / off; touch and hold: the feature's sheet.
 - **Icons everywhere** (`DZIcons.m`): every Deezit icon comes from the same
   Tempo set, Deezer's own (`<name>.small` 16 pt / `<name>.medium` 24 pt):
-  the ••• menu rows (`sliders`, `microphoneMusic`, `human`, `disc`,
-  `dotsHorizontal`), the lyrics Karaoke pill (`microphoneMusic`), the Deezit
+  the ••• menu's extra rows (`human`, `dotsHorizontal`), the artist · album
+  menu (`human`, `disc`), the lyrics Karaoke pill (`microphoneMusic`), the Deezit
   card in Deezer's Settings (`waveform`, `chevronRight`), Deezit's Settings
   (`gauge`, `noteDouble`, `stopwatch`, `microphoneMusic`, `waveformPath`,
   `playCircle`, `lock`, `dotsHorizontal`, `text`, `chevronLeft` / `cross`)
   and the debug log (`share`, `dotsHorizontal`, `gear`, `squareDouble`,
   `trash`, `wrench` / `slashCircle`). Each has an SF Symbol to fall back on.
+  Deezit's pages in Deezer's Settings and the Deezit card use Deezer's colour
+  tokens too (`UIColor` class methods such as
+  `backgroundNeutralSecondaryDefaultColor`, `textNeutralPrimaryDefaultColor`),
+  so they follow Deezer's light or dark theme. The card can't be a row of
+  Deezer's Preferences card: that page is SwiftUI, drawn as one view with no
+  view per row.
 - **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`): a
   "Karaoke Mode" pill that shrinks to a round icon. Tap: lead vocals to 0 %
   with the backing vocals kept; tap again to undo. Touch and hold: the
@@ -308,7 +311,7 @@ everything: filter `subsystem:com.pisknk.deezit`.
 ```
 Tweak.x                     entry point (%ctor)
 DZLog.h / DZDebugLog.*      logging: os_log + in-app ring + log files
-DZIcons.*                   Deezer's Tempo icons (from its bundle at runtime), SF Symbol fallback
+DZIcons.*                   Deezer's Tempo icons and colour tokens (at runtime), with fallbacks
 DZPrefs.*                   NSUserDefaults suite + atomic mirror for the audio thread
 DZAudioParams.h             plain-C params struct shared with the DSP
 DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / Nightcore
@@ -325,7 +328,7 @@ tests/dsp_test.c            CI checks of the two above
 DZSongAnalysis.*            song analysis (beats, bars, music start / end), Apple's analysis, the planner
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
-DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
+DZPlayerMenu.x              the player's ••• as a native iOS menu
 DZPlayerExtras.x            Up next swipe delete, artist · album menu
 DZPlayerArtwork.x           animated cover inside the player's cover square
 DZLyrics.x                  lyrics: Karaoke Mode button, word-by-word highlight

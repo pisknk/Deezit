@@ -1,14 +1,16 @@
 // A "Deezit" card in Deezer's own Settings page.
 //
 // Deezer's Settings (Deezer.SettingsHostingController, presented from
-// DZRRootViewController) is SwiftUI, so its list can't take a real row. Deezit
-// puts its own card, drawn in the page's colours (Subscription / Preferences
-// style: a section title and a rounded row with an icon and a chevron), under
-// the page's content inside its scroll view, and gives the scroll view room
-// for it. Tapping it pushes Deezit's settings, in the same colours, onto the
+// DZRRootViewController) is SwiftUI: its sections (Subscription, Preferences)
+// are drawn by SwiftUI inside one view (HostingScrollView's
+// PlatformGroupContainer), with no view per row, so a row can't be added to
+// the Preferences card itself. Deezit puts its own card under the page's
+// content inside its scroll view, drawn like Deezer's (a section title and a
+// rounded row with an icon and a chevron) in Deezer's own colour tokens, so it
+// follows Deezer's light or dark theme, and gives the scroll view room for it.
+// Tapping it pushes Deezit's settings, in the same colours, onto the
 // navigation controller SwiftUI uses for Settings' own pages; without one it
-// opens as a sheet. The first time the page appears its view tree is logged,
-// to match the look exactly. The three-finger hold still opens the settings.
+// opens as a sheet. The first time the page appears its view tree is logged.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -21,6 +23,15 @@ static void *kDZCardInsetKey = &kDZCardInsetKey;  // scroll view -> its own bott
 static const CGFloat kDZHeaderH = 44, kDZRowH = 48, kDZGapAbove = 12, kDZGapBelow = 32;
 
 static UIColor *rgb(int r, int g, int b) { return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:1]; }
+
+// Deezer's colour tokens (its dark theme's colours if they're missing)
+static UIColor *cardColor(BOOL pressed) {
+    return pressed ? DZTempoColor(@"backgroundNeutralSecondaryPressed", rgb(58, 20, 59))
+                   : DZTempoColor(@"backgroundNeutralSecondaryDefault", rgb(40, 6, 41));
+}
+static UIColor *titleColor(void) { return DZTempoColor(@"textNeutralPrimaryDefault", UIColor.whiteColor); }
+static UIColor *iconColor(void) { return DZTempoColor(@"iconNeutralPrimaryDefault", rgb(210, 177, 211)); }
+static UIColor *headerColor(void) { return DZTempoColor(@"textNeutralSecondaryDefault", rgb(210, 177, 211)); }
 
 static UINavigationController *navInside(UIViewController *vc, int depth) {
     if (depth > 6) return nil;
@@ -57,20 +68,19 @@ static void openDeezit(UIViewController *host) {
 
 - (instancetype)init {
     if ((self = [super initWithFrame:CGRectZero])) {
-        self.backgroundColor = rgb(40, 6, 41);
+        self.backgroundColor = cardColor(NO);
         self.layer.cornerRadius = 12;
         self.layer.cornerCurve = kCACornerCurveContinuous;
-        UIColor *secondary = rgb(210, 177, 211);
 
         UIImageView *icon = [[UIImageView alloc] initWithImage:DZIcon(@"waveform", @"waveform", 0)];
-        icon.tintColor = secondary;
+        icon.tintColor = iconColor();
         icon.contentMode = UIViewContentModeCenter;
         UILabel *title = [UILabel new];
         title.text = @"Deezit";
         title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-        title.textColor = UIColor.whiteColor;
-        UIImageView *chevron = [[UIImageView alloc] initWithImage:DZIcon(@"chevronRight", @"chevron.right", 16)];
-        chevron.tintColor = secondary;
+        title.textColor = titleColor();
+        UIImageView *chevron = [[UIImageView alloc] initWithImage:DZIcon(@"chevronRight", @"chevron.right", 0)];
+        chevron.tintColor = iconColor();
         for (UIView *v in @[icon, title, chevron]) {
             v.translatesAutoresizingMaskIntoConstraints = NO;
             v.userInteractionEnabled = NO;
@@ -93,7 +103,7 @@ static void openDeezit(UIViewController *host) {
 
 - (void)setHighlighted:(BOOL)highlighted {
     [super setHighlighted:highlighted];
-    self.backgroundColor = highlighted ? rgb(58, 20, 59) : rgb(40, 6, 41);
+    self.backgroundColor = cardColor(highlighted);
 }
 
 @end
@@ -110,7 +120,7 @@ static void openDeezit(UIViewController *host) {
         UILabel *header = [UILabel new];
         header.text = @"Deezit";
         header.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
-        header.textColor = rgb(210, 177, 211);
+        header.textColor = headerColor();
         header.frame = CGRectMake(16, kDZGapAbove, 300, kDZHeaderH - 8);
         [self addSubview:header];
         DZDeezitRow *row = [DZDeezitRow new];
@@ -214,6 +224,15 @@ static void attachCard(UIViewController *vc, NSString *when) {
     if (!card) {
         card = [[DZDeezitCard alloc] initWithHost:vc];
         objc_setAssociatedObject(vc, kDZCardKey, card, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // what the tokens give in this theme, to compare with Deezer's own rows
+        UIColor *(^on)(UIColor *) = ^UIColor *(UIColor *c) { return [c resolvedColorWithTraitCollection:vc.traitCollection]; };
+        CGFloat r = 0, g = 0, b = 0, a = 0, tr = 0, tg = 0, tb = 0;
+        [on(cardColor(NO)) getRed:&r green:&g blue:&b alpha:&a];
+        [on(titleColor()) getRed:&tr green:&tg blue:&tb alpha:&a];
+        DZLog("settings: Deezit card %@ (%@ theme): card %d,%d,%d · title %d,%d,%d",
+              DZTempoColorsAvailable() ? @"in Deezer's colour tokens" : @"in Deezit's dark colours",
+              vc.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ? @"dark" : @"light",
+              (int)(r * 255), (int)(g * 255), (int)(b * 255), (int)(tr * 255), (int)(tg * 255), (int)(tb * 255));
     }
     if (card.superview != sv) {
         [card removeFromSuperview];

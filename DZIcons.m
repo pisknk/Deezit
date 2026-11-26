@@ -1,5 +1,6 @@
 #import "DZIcons.h"
 #import "DZLog.h"
+#import <objc/message.h>
 
 static NSBundle *tempoBundle(void) {
     static NSBundle *bundle;
@@ -48,4 +49,22 @@ UIImage *DZIcon(NSString *name, NSString *fallback, CGFloat point) {
     }
     if (img) [cache setObject:img forKey:key];
     return img;
+}
+
+UIColor *DZTempoColor(NSString *token, UIColor *fallback) {
+    SEL s = NSSelectorFromString([token stringByAppendingString:@"Color"]);
+    if (![UIColor respondsToSelector:s]) return fallback;
+    id c = ((id (*)(id, SEL))objc_msgSend)([UIColor class], s);
+    return [c isKindOfClass:[UIColor class]] ? c : fallback;
+}
+
+BOOL DZTempoColorsAvailable(void) {
+    static BOOL available;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        available = [UIColor respondsToSelector:NSSelectorFromString(@"backgroundNeutralPrimaryDefaultColor")] &&
+                    [UIColor respondsToSelector:NSSelectorFromString(@"textNeutralPrimaryDefaultColor")];
+        DZLog("colors: %@", available ? @"Deezer's Tempo colour tokens" : @"Tempo colour tokens not found, Deezit's own");
+    });
+    return available;
 }

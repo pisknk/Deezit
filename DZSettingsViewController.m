@@ -11,13 +11,14 @@
 #define DEEZIT_VERSION "dev"
 #endif
 
-// One controller, three pages:
-//   Playback Controls (player ••• menu): Slowed + Reverb switch, AutoMix
-//     switch, presets, speed, reverb, reset
-//   Karaoke Mode (player ••• menu, under Playback Controls): Sing - vocals,
-//     backing vocals, strength, model
-//   Settings (three-finger hold): app-level things - the Sing model download
-//     and the lock-screen covers
+// One controller, four pages:
+//   Playback Controls (hold the player's Slowed + Reverb button): Slowed +
+//     Reverb switch, presets, speed, reverb, reset
+//   Karaoke Mode (hold a Karaoke button): Sing - vocals, backing vocals,
+//     strength, model
+//   AutoMix (hold the player's AutoMix button): AutoMix, Tempo matching
+//   Settings (Deezer's Settings → Deezit): app-level things - the Sing model
+//     download, the model lab, the player, covers, lyrics
 typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionEffect,      // controls
     DZSectionAutoMix,     // controls
@@ -89,7 +90,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
 
 #pragma mark - controller
 
-typedef NS_ENUM(NSInteger, DZPage) { DZPageSettings, DZPageControls, DZPageKaraoke };
+typedef NS_ENUM(NSInteger, DZPage) { DZPageSettings, DZPageControls, DZPageKaraoke, DZPageAutoMix };
 
 @interface DZSettingsViewController ()
 @property (nonatomic, copy) NSString *pageTitle;
@@ -97,15 +98,19 @@ typedef NS_ENUM(NSInteger, DZPage) { DZPageSettings, DZPageControls, DZPageKarao
 @property (nonatomic) BOOL deezerStyle;   // opened from Deezer's own Settings: its colours and header
 @end
 
-// Deezer's Settings page (iOS 27, from a screenshot): background, cards,
-// dividers, secondary text / icons, accent.
+// Deezer's Settings colours: its own Tempo colour tokens, so the page follows
+// Deezer's light or dark theme. Without them, the dark theme's colours (from a
+// screenshot) and the page stays dark.
 static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:1]; }
-#define kDZDeezerBG dzRGB(27, 1, 30)
-#define kDZDeezerCard dzRGB(40, 6, 41)
-#define kDZDeezerDivider dzRGB(68, 34, 69)
-#define kDZDeezerSecondary dzRGB(210, 177, 211)
-#define kDZDeezerAccent dzRGB(241, 186, 251)
-#define kDZDeezerButton dzRGB(65, 31, 66)
+#define kDZDeezerBG DZTempoColor(@"backgroundNeutralPrimaryDefault", dzRGB(27, 1, 30))
+#define kDZDeezerCard DZTempoColor(@"backgroundNeutralSecondaryDefault", dzRGB(40, 6, 41))
+#define kDZDeezerDivider DZTempoColor(@"dividerNeutralPrimaryDefault", dzRGB(68, 34, 69))
+#define kDZDeezerText DZTempoColor(@"textNeutralPrimaryDefault", UIColor.whiteColor)
+#define kDZDeezerSecondary DZTempoColor(@"textNeutralSecondaryDefault", dzRGB(210, 177, 211))
+#define kDZDeezerIcon DZTempoColor(@"iconNeutralPrimaryDefault", dzRGB(210, 177, 211))
+#define kDZDeezerAccent DZTempoColor(@"textAccentPrimaryDefault", dzRGB(241, 186, 251))
+#define kDZDeezerSwitch DZTempoColor(@"backgroundAccentPrimaryDefault", dzRGB(241, 186, 251))
+#define kDZDeezerButton DZTempoColor(@"backgroundNeutralTertiaryDefault", dzRGB(65, 31, 66))
 
 @implementation DZSettingsViewController
 
@@ -118,7 +123,7 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
 }
 
 - (void)applyDeezerStyle {
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    if (!DZTempoColorsAvailable()) self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     self.tableView.backgroundColor = kDZDeezerBG;
     self.tableView.separatorColor = kDZDeezerDivider;
     self.tableView.tintColor = kDZDeezerAccent;
@@ -140,7 +145,7 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
     UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
     BOOL pushed = self.navigationController.viewControllers.count > 1 && self.navigationController.topViewController == self;
     [back setImage:pushed ? DZIcon(@"chevronLeft", @"chevron.left", 0) : DZIcon(@"cross", @"xmark", 0) forState:UIControlStateNormal];
-    back.tintColor = UIColor.whiteColor;
+    back.tintColor = kDZDeezerText;
     back.backgroundColor = kDZDeezerButton;
     back.layer.cornerRadius = 22;
     back.frame = CGRectMake(16, 14, 44, 44);
@@ -149,7 +154,7 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
     UILabel *title = [UILabel new];
     title.text = self.pageTitle ?: @"Deezit";
     title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    title.textColor = UIColor.whiteColor;
+    title.textColor = kDZDeezerText;
     title.textAlignment = NSTextAlignmentCenter;
     title.frame = CGRectMake(70, 14, header.bounds.size.width - 140, 44);
     title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
@@ -174,12 +179,18 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
     cell.backgroundColor = kDZDeezerCard;
     if ([cell.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
         UIListContentConfiguration *cfg = (UIListContentConfiguration *)cell.contentConfiguration;
-        cfg.imageProperties.tintColor = kDZDeezerSecondary;
+        cfg.imageProperties.tintColor = kDZDeezerIcon;
         cfg.textProperties.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        // rows that are buttons (Download, Delete…) keep their own colour
+        if ([cfg.textProperties.color isEqual:UIColor.labelColor]) cfg.textProperties.color = kDZDeezerText;
         cfg.secondaryTextProperties.color = kDZDeezerSecondary;
         cell.contentConfiguration = cfg;
     }
-    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) ((UISwitch *)cell.accessoryView).onTintColor = kDZDeezerAccent;
+    if ([cell isKindOfClass:[DZSliderCell class]]) {
+        ((DZSliderCell *)cell).titleLabel.textColor = kDZDeezerText;
+        ((DZSliderCell *)cell).valueLabel.textColor = kDZDeezerSecondary;
+    }
+    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) ((UISwitch *)cell.accessoryView).onTintColor = kDZDeezerSwitch;
 }
 
 - (void)tableView:(UITableView *)tv willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
@@ -218,6 +229,10 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
 
 + (UIViewController *)karaokeController {
     return [self sheetWithPage:DZPageKaraoke title:@"Karaoke Mode"];
+}
+
++ (UIViewController *)autoMixController {
+    return [self sheetWithPage:DZPageAutoMix title:@"AutoMix"];
 }
 
 + (UIViewController *)sheetWithPage:(DZPage)page title:(NSString *)title {
@@ -259,8 +274,9 @@ static NSInteger singModelInUse(void) {
         case DZSectionSpeed:
         case DZSectionReverb:
         case DZSectionReset:
-        case DZSectionAutoMix:
             return [self isControls];
+        case DZSectionAutoMix:
+            return self.page == DZPageAutoMix;
         case DZSectionModel:
         case DZSectionDemucs:
         case DZSectionPlayer:
@@ -414,50 +430,23 @@ static NSInteger singModelInUse(void) {
     section = [self kindAt:section];
     if (section < 0) return nil;
     switch (section) {
-        case DZSectionEffect:
-            return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionAutoMix:
-            return [NSString stringWithFormat:
-                    @"Mixes each song into the next like a DJ: a bass swap, an echo out or a filter fade, on the beat, "
-                    @"where this one's last phrase ends. Tempo matching plays the next song at this one's tempo while they "
-                    @"overlap (up to 10%% apart, the key stays), then eases it back to its own. "
-                    @"Uses Apple Music's analysis of the songs and Deezit's own: Deezit learns a song the first time it plays "
-                    @"to the end (%lu so far). Songs neither knows keep Deezer's crossfade setting; skips stay instant.",
-                    (unsigned long)DZAutoMixLearnedSongs()];
+            return @"Blends each song into the next on the beat, like a DJ.";
         case DZSectionSing:
-            return singReady()
-                ? @"Takes the singing out with an on-device AI model: Spleeter (by Deezer Research) or MDX-Net (UVR's 9482, "
-                  @"from Deezit Settings → Model lab; cleaner, keeps more of the instruments and the highs). Backing vocals keeps "
-                  @"the harmonies spread left and right "
-                  @"and removes only the centred lead. Strength: Gentle only removes what the model is sure is voice "
-                  @"(instruments like violins and claps stay, a little voice may remain); Strong removes more, instruments "
-                  @"included. Changes are heard after about 3 seconds."
-                : @"Needs the vocal model: open Deezit Settings (three-finger hold) → Sing → Download.";
+            return singReady() ? nil : @"Download a vocal model first: Settings → Deezit → Sing.";
         case DZSectionSpeed:
-            return @"Pitch follows speed, like a turntable: slower is deeper.";
-        case DZSectionReset:
-            return @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
+            return @"Slower is deeper, like a record.";
         case DZSectionModel:
-            return @"Sing removes vocals with Spleeter (2-stems, by Deezer Research, MIT licence), running on the iPhone's "
-                   @"Neural Engine. The model is downloaded once from the Deezit GitHub releases; audio never leaves the phone. "
-                   @"Turn it up or down with ••• → Karaoke Mode → Vocals.";
+            return @"Removes vocals on this iPhone; no audio leaves it.";
         case DZSectionDemucs:
-            return @"MDX-Net: UVR's MDX-Net 9482 vocal model (by Anjok07, MIT licence; about 14 MB), converted to Core ML and "
-                   @"checked against the original in Deezit's CI. Once downloaded, pick it in ••• → Karaoke Mode → Model. "
-                   @"The benchmark times it on this iPhone and shows how much runs on the Neural Engine, which Sing needs to keep "
-                   @"working with the screen locked. Takes about a minute. "
-                   @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";
+            return @"A cleaner vocal model, picked in Karaoke Mode.";
         case DZSectionLockScreen:
-            return @"Plays Apple Music's motion cover of the album, when it has one: on the lock screen (needs iOS 26) and inside "
-                   @"the cover square of the full-screen player. Paused in Low Power Mode.";
+            return @"Apple Music's moving album covers, when there is one.";
         case DZSectionPlayer:
-            return @"The player's ••• opens an iOS menu with Deezer's options. Options that open a page (Add to Playlist, "
-                   @"Share…) open Deezer's own sheet on that page. Turn it off to get Deezer's sheet back.";
+            return @"Opens the player's ••• options as an iOS menu.";
+        case DZSectionReset:
         case DZSectionLyrics:
-            return @"Lights up the line being sung word by word. Deezer times whole lines only, so Deezit spreads each line's "
-                   @"time over its words: close, not exact. The Karaoke Mode button sits bottom left in the lyrics: tap to "
-                   @"remove the lead vocals, touch and hold for the options.\n\n"
-                   @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
+            return @"Deezit " DEEZIT_VERSION;
     }
     return nil;
 }
@@ -633,7 +622,8 @@ static NSInteger singModelInUse(void) {
             } else {
                 cfg = [UIListContentConfiguration subtitleCellConfiguration];
                 cfg.text = @"Last benchmark";
-                cfg.secondaryText = DZDemucsBenchmarkResult();
+                // the headline only; the whole result is in the debug log
+                cfg.secondaryText = [DZDemucsBenchmarkResult() componentsSeparatedByString:@"\n"].firstObject;
                 cfg.secondaryTextProperties.numberOfLines = 0;
                 cfg.secondaryTextProperties.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
             }

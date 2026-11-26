@@ -14,7 +14,7 @@
 // in the share button's current colours (followed when Deezer recolours it).
 // Tap: turns the feature on / off (filled glyph when on, outline when off,
 // like the heart). Touch and hold: its sheet (Playback Controls; Karaoke
-// Mode; AutoMix's switch is in Playback Controls).
+// Mode; AutoMix).
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -83,6 +83,7 @@ void DZPresentSheet(UIViewController *vc, DZSheet sheet) {
     while (top.presentedViewController && !top.presentedViewController.isBeingDismissed) top = top.presentedViewController;
     if (!top.view.window) return;
     UIViewController *pc = sheet == DZSheetKaraoke ? [DZSettingsViewController karaokeController]
+                         : sheet == DZSheetAutoMix ? [DZSettingsViewController autoMixController]
                                                    : [DZSettingsViewController playbackControlsController];
     [top presentViewController:pc animated:YES completion:nil];
 }
@@ -327,7 +328,8 @@ static void *kDZShareMirrorKey = &kDZShareMirrorKey;   // Deezer's share button 
 - (void)held:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-    DZPresentSheet([self host], g.view.tag == DZQuickKaraoke ? DZSheetKaraoke : DZSheetPlaybackControls);
+    DZSheet sheet = g.view.tag == DZQuickKaraoke ? DZSheetKaraoke : g.view.tag == DZQuickAutoMix ? DZSheetAutoMix : DZSheetPlaybackControls;
+    DZPresentSheet([self host], sheet);
 }
 
 @end

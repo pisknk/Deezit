@@ -13,9 +13,6 @@
 @end
 
 @implementation DZGestureTarget
-- (void)settingsPress:(UILongPressGestureRecognizer *)g {
-    if (g.state == UIGestureRecognizerStateBegan) DZPresentSettings();
-}
 - (void)debugTap:(UITapGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateRecognized) DZPresentDebug();
 }
@@ -30,14 +27,6 @@ static void *kDZGestureAttachedKey = &kDZGestureAttachedKey;
 
 static void attachToWindow(UIWindow *w) {
     if (!w || objc_getAssociatedObject(w, kDZGestureAttachedKey)) return;
-
-    // three-finger hold: settings (temporary until the in-Deezer entry points land)
-    UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:sTarget action:@selector(settingsPress:)];
-    hold.numberOfTouchesRequired = 3;
-    hold.minimumPressDuration = 0.6;
-    hold.cancelsTouchesInView = NO;
-    hold.delegate = sTarget;
-    [w addGestureRecognizer:hold];
 
     // three-finger double tap: debug panel (same gesture as CCBoost)
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:sTarget action:@selector(debugTap:)];
@@ -108,10 +97,10 @@ void DZSettingsEntryInstall(void) {
             if (![[d stringForKey:key] isEqualToString:@DEEZIT_VERSION]) {
                 [d setObject:@DEEZIT_VERSION forKey:key];
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    DZToast(@"Deezit " DEEZIT_VERSION " loaded\n3-finger hold: settings · 3-finger double tap: debug");
+                    DZToast(@"Deezit " DEEZIT_VERSION " loaded");
                 });
             }
         }];
-        DZLog("entry: three-finger hold = settings, three-finger double tap = debug panel");
+        DZLog("entry: three-finger double tap = debug panel; settings in Deezer's Settings, Deezit row");
     });
 }

@@ -13,7 +13,7 @@ BOOL DZKaraokeIsOn(void);        // lead vocals below 100 %
 void DZKaraokeToggle(void);
 
 // Presents one of Deezit's sheets over whatever is on top of `vc`.
-typedef NS_ENUM(NSInteger, DZSheet) { DZSheetPlaybackControls, DZSheetKaraoke };
+typedef NS_ENUM(NSInteger, DZSheet) { DZSheetPlaybackControls, DZSheetKaraoke, DZSheetAutoMix };
 void DZPresentSheet(UIViewController *vc, DZSheet sheet);
 
 NS_ASSUME_NONNULL_END

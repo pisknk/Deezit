@@ -148,7 +148,7 @@ void DZToast(NSString *message) {
         @"%@\n"
         @"%@\n"
         @"effect: %@ · speed %.2fx · reverb mix %d%% room %d%% damp %d%% · vocals %d%%\n"
-        @"gestures: 3-finger double tap = this panel · 3-finger hold = settings\n"
+        @"gestures: 3-finger double tap = this panel · settings: Deezer's Settings → Deezit\n"
         @"──────────────────────────────────────────\n",
         DEEZIT_VERSION,
         b.bundleIdentifier, [b objectForInfoDictionaryKey:@"CFBundleShortVersionString"],

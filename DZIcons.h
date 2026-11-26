@@ -1,4 +1,5 @@
-// Deezer's own icons, used for every Deezit icon.
+// Deezer's own icons and colours, used for every Deezit icon and for the
+// pages Deezit shows inside Deezer's Settings.
 //
 // They come from the Tempo design system's asset catalog inside the app
 // (Tempo_Tempo.bundle/Assets.car): 258 vector icons named "<name>.small"
@@ -21,6 +22,14 @@ UIImage *DZTempoImage(NSString *name, NSString *size);
 // "medium" as it is (24 pt). If the app has no such icon, the SF Symbol
 // `fallback` is used instead (nil fallback: nil).
 UIImage *DZIcon(NSString *name, NSString *fallback, CGFloat point);
+
+// One of Deezer's Tempo colour tokens: the UIColor class method
+// +<token>Color, e.g. DZTempoColor(@"textNeutralPrimaryDefault", ...).
+// `fallback` when Deezer has no such method.
+UIColor *DZTempoColor(NSString *token, UIColor *fallback);
+
+// YES when Deezer's colour tokens are there.
+BOOL DZTempoColorsAvailable(void);
 
 #ifdef __cplusplus
 }
