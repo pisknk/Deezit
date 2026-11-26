@@ -180,7 +180,7 @@ static void holdContentPop(UIViewController *vc, BOOL hold) {
 
 static Class sQueueClass;
 
-static NSString *yn(BOOL b) { return b ? @"yes" : @"no"; }
+static NSString *yesNo(BOOL b) { return b ? @"yes" : @"no"; }
 
 // Pan gestures from the table up to the window, which could take a row's
 // swipe (the table's own scroll pan is listed as well).
@@ -216,15 +216,15 @@ static void logQueueState(DZRQueueListViewController *vc) {
         BOOL can = [vc canDeleteRowAtIndexPath:ip];
         BOOL offered = [vc tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip] != nil;
         NSInteger style = [(id<UITableViewDelegate>)vc tableView:tv editingStyleForRowAtIndexPath:ip];
-        row = [NSString stringWithFormat:@"row %ld deletable %@, style %ld, Delete offered %@", (long)probe, yn(can), (long)style, yn(offered)];
+        row = [NSString stringWithFormat:@"row %ld deletable %@, style %ld, Delete offered %@", (long)probe, yesNo(can), (long)style, yesNo(offered)];
     }
     UIGestureRecognizer *pop = contentPop(vc);
     NSString *line = [NSString stringWithFormat:
         @"up next: %ld rows, playing row %ld · queue editable %@, delete mode %@ · %@ · table editing %@, delegate %@, data source %@ · content swipe back %@ · %lu screens deep · pans: %@",
         (long)rows, (long)playing,
-        [vc respondsToSelector:@selector(canEditQueueList)] ? yn([vc canEditQueueList]) : @"?",
-        [vc respondsToSelector:@selector(isDeleting)] ? yn([vc isDeleting]) : @"?",
-        row, yn(tv.isEditing),
+        [vc respondsToSelector:@selector(canEditQueueList)] ? yesNo([vc canEditQueueList]) : @"?",
+        [vc respondsToSelector:@selector(isDeleting)] ? yesNo([vc isDeleting]) : @"?",
+        row, yesNo(tv.isEditing),
         tv.delegate == (id)vc ? @"Up next" : NSStringFromClass([(id)tv.delegate class]),
         tv.dataSource == (id)vc ? @"Up next" : NSStringFromClass([(id)tv.dataSource class]),
         pop ? (pop.enabled ? @"on" : @"off") : @"none",
@@ -267,7 +267,7 @@ static void logQueueState(DZRQueueListViewController *vc) {
 // neither); a swipe that never logs "opened" never started
 %new
 - (void)tableView:(UITableView *)tv willBeginEditingRowAtIndexPath:(NSIndexPath *)ip {
-    DZLog("up next: swipe opened on row %ld (deletable %@)", (long)ip.row, yn([self canDeleteRowAtIndexPath:ip]));
+    DZLog("up next: swipe opened on row %ld (deletable %@)", (long)ip.row, yesNo([self canDeleteRowAtIndexPath:ip]));
 }
 
 %new
