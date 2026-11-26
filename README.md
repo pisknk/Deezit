@@ -268,7 +268,14 @@ Deezit's analysis next to Apple's.
   wipe. It's close, not exact. Settings → Lyrics → Word by word.
 - **Animated cover in the player** (`DZPlayerArtwork.x`): the album's Apple
   Music motion cover plays muted inside the cover square, found and cached
-  like the lock-screen one. Settings → Animated covers → Player.
+  like the lock-screen one. Settings → Animated covers → Player. Each cover
+  decides for itself whether it's the one in the middle of the strip, every
+  time the strip scrolls (by a finger or by itself on a track change), lays
+  out, or its clip arrives, so it starts without reopening the player; turning
+  the setting on starts the covers already on screen. A cover iOS pauses
+  (background, an audio interruption) plays again. A failed download is tried
+  again after a minute. The log says when a cover plays, pauses or is
+  resumed.
 - **Native ••• menu** (`DZPlayerMenu.x`, Settings → Player): the ••• opens an
   iOS menu. When it opens, Deezit asks Deezer for its sheet, takes it instead
   of showing it and reads its rows (`actionText`, `actionImage`,
