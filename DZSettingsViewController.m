@@ -27,6 +27,7 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionReset,       // controls
     DZSectionModel,       // settings: Sing model download
     DZSectionDemucs,      // settings: experimental model lab (MDX-Net) + benchmark
+    DZSectionPlayer,      // settings: native ••• menu
     DZSectionLockScreen,  // settings: animated covers (lock screen, player)
     DZSectionLyrics,      // settings: word by word
     DZSectionCount,
@@ -154,6 +155,7 @@ static NSInteger singModelInUse(void) {
             return [self isControls];
         case DZSectionModel:
         case DZSectionDemucs:
+        case DZSectionPlayer:
         case DZSectionLockScreen:
         case DZSectionLyrics:
             return self.page == DZPageSettings;
@@ -249,6 +251,7 @@ static NSInteger singModelInUse(void) {
             if (st != DZDemucsReady) return 2;                          // status, download / cancel
             return DZDemucsBenchmarkResult() ? 4 : 3;                   // + benchmark, + result
         }
+        case DZSectionPlayer: return 1;
         case DZSectionLockScreen: return 2;
         case DZSectionLyrics: return 1;
     }
@@ -264,6 +267,7 @@ static NSInteger singModelInUse(void) {
         case DZSectionReverb: return @"Reverb";
         case DZSectionModel: return @"Sing";
         case DZSectionDemucs: return @"Model lab (experimental)";
+        case DZSectionPlayer: return @"Player";
         case DZSectionLockScreen: return @"Animated covers";
         case DZSectionLyrics: return @"Lyrics";
     }
@@ -307,6 +311,9 @@ static NSInteger singModelInUse(void) {
         case DZSectionLockScreen:
             return @"Plays Apple Music's motion cover of the album, when it has one: on the lock screen (needs iOS 26) and inside "
                    @"the cover square of the full-screen player. Paused in Low Power Mode.";
+        case DZSectionPlayer:
+            return @"The player's ••• opens an iOS menu with Deezer's options. Options that open a page (Add to Playlist, "
+                   @"Share…) open Deezer's own sheet on that page. Turn it off to get Deezer's sheet back.";
         case DZSectionLyrics:
             return @"Lights up the line being sung word by word. Deezer times whole lines only, so Deezit spreads each line's "
                    @"time over its words: close, not exact. The Karaoke Mode button sits bottom left in the lyrics: tap to "
@@ -506,6 +513,18 @@ static NSInteger singModelInUse(void) {
             c.accessoryView = sw;
             return c;
         }
+        case DZSectionPlayer: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            cfg.text = @"Native ••• menu";
+            cfg.image = [UIImage systemImageNamed:@"ellipsis.circle"];
+            c.contentConfiguration = cfg;
+            UISwitch *sw = [UISwitch new];
+            sw.on = DZPrefBool(kDZNativeMenu);
+            [sw addTarget:self action:@selector(toggleNativeMenu:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+            return c;
+        }
         case DZSectionLyrics: {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
@@ -562,6 +581,10 @@ static NSInteger singModelInUse(void) {
 
 - (void)togglePlayerArtwork:(UISwitch *)sw {
     DZPrefSet(kDZPlayerArtwork, @(sw.on));
+}
+
+- (void)toggleNativeMenu:(UISwitch *)sw {
+    DZPrefSet(kDZNativeMenu, @(sw.on));
 }
 
 - (void)toggleWordLyrics:(UISwitch *)sw {

@@ -193,8 +193,13 @@ for songs both know, Deezit's analysis next to Apple's.
 - **Animated cover in the player** (`DZPlayerArtwork.x`): the album's Apple
   Music motion cover plays muted inside the cover square, found and cached
   like the lock-screen one. Settings → Animated covers → Player.
-- Not done: the ••• menu as a native iOS menu. Some of Deezer's menu rows open
-  further pages inside that sheet, which a native menu can't host.
+- **Native ••• menu** (`DZPlayerMenu.x`, Settings → Player): the ••• opens an
+  iOS menu. When it opens, Deezit asks Deezer for its sheet, takes it instead
+  of showing it and reads its rows (`actionText`, `actionImage`,
+  `displaysChevron`). Rows with a chevron (Add to Playlist, Share…) present
+  Deezer's sheet and select the row in it. Other rows run in the unseen sheet:
+  anything they present is shown from the player. The song's artists replace
+  the sheet's header.
 
 ## Animated lock-screen covers
 

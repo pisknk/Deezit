@@ -20,6 +20,7 @@ NSString *const kDZSingModel = @"singModel";
 NSString *const kDZAutoMix = @"autoMix";
 NSString *const kDZPlayerArtwork = @"playerArtwork";
 NSString *const kDZWordLyrics = @"wordLyrics";
+NSString *const kDZNativeMenu = @"nativeMenu";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -54,6 +55,7 @@ static NSDictionary *defaultValues(void) {
         kDZAutoMix: @NO,
         kDZPlayerArtwork: @YES,
         kDZWordLyrics: @YES,
+        kDZNativeMenu: @YES,
     };
 }
 
