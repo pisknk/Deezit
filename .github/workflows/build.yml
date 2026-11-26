@@ -20,6 +20,11 @@ jobs:
     - name: checkout code
       uses: actions/checkout@v5
 
+    - name: DSP self-test (AutoMix time-stretch + transition effects)
+      run: |
+        clang -O2 -Wall -o dsp_test tests/dsp_test.c DZTimeStretch.c DZTransitionFX.c -lm
+        ./dsp_test
+
     - name: setup theos
       run: |
         # theos needs GNU make; ldid signs the dylib

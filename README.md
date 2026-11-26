@@ -171,25 +171,52 @@ A's music winds down, kept between 1 and 12 s. It knows songs from:
 schedules on the two songs' player nodes (about 3 s ahead, by song position),
 so a change is more than a volume crossfade. Per pair it picks:
 
-- **bass swap** when the tempos are within 6 % (half / double time counts):
-  B plays 2-4 bars without bass, then on A's bar line A's bass is pulled out
-  and B's drops in;
+- **bass swap** when the tempos are within 10 % (half / double time counts;
+  6 % with tempo matching off): B comes in 2-8 bars early without bass, then
+  on A's bar line A's bass is pulled out and B's drops in, and A fades out
+  over 2 bars;
 - **echo out** when A has bars: A's last beats repeat on a ¾-beat echo with
   darkening repeats and A drops out on the bar B's first downbeat lands on;
 - **filter fade** otherwise: A closes into a low-pass, B opens from a
   high-pass.
 
-B's part only runs once Deezer has really started the crossfade (never after
-a skip). There's no time-stretching: tempos aren't matched, so the overlap
-stays short when they differ.
+A mixes out on the start of a phrase (every 8th bar from its first) in the
+32 s before its music winds down, so its last part may be skipped; it then
+plays on silently to its end. Overlaps go up to 50 s.
+
+**Tempo matching** (`DZTimeStretch.c`, Settings → AutoMix → Tempo matching,
+on by default): while the two overlap, B plays at A's tempo, with its key
+kept (WSOLA: 46 ms frames, each moved by up to ±12 ms to line up with the
+last). Once A is gone, B eases back to its own tempo over 4-8 bars. B's
+stretched buffers are scheduled in place of Deezer's. Deezer's clock for a
+song adds up the frames of the buffers it scheduled
+(`-[DZRAudioTrackController outputChannelDidPlay:]`), so B's lyrics and
+progress stay with B. `tests/dsp_test.c` checks the stretcher and the effects
+in CI.
+
+**Timing:** Deezer starts B when A's remaining time drops below the
+crossfade, checked as each 83 ms buffer of A finishes. Deezit tells Deezer
+0.12 s more than its plan and starts B with the few ms of silence that put
+its downbeat on A's bar line. A started somewhere else (a seek into the
+change) gets Deezer's own crossfade.
+
+**A's level:** Deezer fades a song out through its player node's volume
+(`-audioMixingVolumeDidUpdate:` → `-setVolume:`). During a transition Deezit
+keeps A's node at the volume it had and the transition shapes A's level.
+
+B's part only runs on a B that came in with the crossfade (never after a
+skip). Deezer asks about the next pair as soon as B starts, so the running
+transition is kept apart from the next one planned.
 
 Where the music ends comes from Deezit's own analysis when there is one (it
 measured Deezer's file; in the probe Apple's fade-out time was about 2 s early
 for one song), bars from Apple when its release has the same length. A pair
 with nothing known about the first song keeps Deezer's crossfade setting, and
-pairs Deezer keeps gapless stay gapless. Deezer still does the fading, so
-nothing new runs in the audio path. The log shows each plan ("automix:") and,
-for songs both know, Deezit's analysis next to Apple's.
+pairs Deezer keeps gapless stay gapless. The log shows each plan
+("automix:"), each change as it starts (where A was against the plan), B's
+tempo ("comes in … ms ahead, padded, at …% speed", "back at its own tempo")
+and the volume hold ("holding … at volume …"), and, for songs both know,
+Deezit's analysis next to Apple's.
 
 ## Player and lyrics extras
 
@@ -265,6 +292,9 @@ DZVocalModel.*              vocal model download / compile / load
 DZDemucsModel.*             model lab: MDX-Net download, benchmark, playback loading
 tools/vocal_model/          Spleeter / MDX-Net / HT-Demucs -> Core ML (vocal-model*.yml)
 DZAutoMix.x                 AutoMix: plans Deezer's crossfade per pair, learns songs as they're decoded
+DZTransitionFX.c            AutoMix transitions: bass swap, echo out, filter fade
+DZTimeStretch.c             AutoMix tempo matching: WSOLA time-stretch of the song coming in
+tests/dsp_test.c            CI checks of the two above
 DZSongAnalysis.*            song analysis (beats, bars, music start / end), Apple's analysis, the planner
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)

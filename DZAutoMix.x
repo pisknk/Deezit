@@ -1014,8 +1014,8 @@ AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBu
 // applyCrossFadeDurationForNextTrackChange gives both fades the same length).
 // AutoMix brings it in as its transition needs: within 2 s for a bass swap
 // (B plays without bass until the swap), 0.3 s for an echo out (B lands on
-// the downbeat), 1-3 s for a filter fade. The current song still fades over
-// the whole overlap.
+// the downbeat), 1-3 s for a filter fade. The current song's fade-out is held
+// off while the transition shapes it (installVolumeHold).
 - (void)setPlaybackAttackDuration:(double)d {
     double planned = atomic_load(&sLastPlanned);
     if (autoMixOn() && planned > 0 && fabs(d - planned) < 0.01) {
@@ -1077,8 +1077,9 @@ void DZAutoMixInstall(void) {
         if (ok) %init(DZAutoMixListen);
         else DZLog("automix: DZRAudioTrackController not as expected, Deezit won't learn songs (Apple's analysis only)");
 
-        DZLog("automix: ready, %@ · Deezit has learned %lu songs, Apple's analysis saved for %lu",
-              autoMixOn() ? @"on" : @"off (••• → Playback Controls)", (unsigned long)DZSongInfoCount(@"deezit"),
+        DZLog("automix: ready, %@ · tempo matching %@ · fade-out hold %@ · Deezit has learned %lu songs, Apple's analysis saved for %lu",
+              autoMixOn() ? @"on" : @"off (••• → Playback Controls)", DZPrefBool(kDZAutoMixTempo) ? @"on" : @"off",
+              sHoldReady ? @"ready" : @"unavailable", (unsigned long)DZSongInfoCount(@"deezit"),
               (unsigned long)DZSongInfoCount(@"apple"));
     });
 }

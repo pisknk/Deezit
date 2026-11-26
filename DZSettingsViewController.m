@@ -349,7 +349,7 @@ static NSInteger singModelInUse(void) {
     if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
-        case DZSectionAutoMix: return 1;
+        case DZSectionAutoMix: return 2;   // AutoMix, Tempo matching
         case DZSectionSing:                                    // Vocals, Backing vocals, Strength, + Model with both
             return !singReady() ? 1 : (DZLabModelInstalled(kDZLabMDX) && DZVocalModelGetState() == DZVocalModelReady ? 4 : 3);
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
@@ -393,7 +393,9 @@ static NSInteger singModelInUse(void) {
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
         case DZSectionAutoMix:
             return [NSString stringWithFormat:
-                    @"Plans every crossfade from the two songs: the next one comes in on the beat, where this one winds down. "
+                    @"Mixes each song into the next like a DJ: a bass swap, an echo out or a filter fade, on the beat, "
+                    @"where this one's last phrase ends. Tempo matching plays the next song at this one's tempo while they "
+                    @"overlap (up to 10%% apart, the key stays), then eases it back to its own. "
                     @"Uses Apple Music's analysis of the songs and Deezit's own: Deezit learns a song the first time it plays "
                     @"to the end (%lu so far). Songs neither knows keep Deezer's crossfade setting; skips stay instant.",
                     (unsigned long)DZAutoMixLearnedSongs()];
@@ -460,12 +462,14 @@ static NSInteger singModelInUse(void) {
         case DZSectionAutoMix: {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
-            cfg.text = @"AutoMix";
-            cfg.image = [UIImage systemImageNamed:@"arrow.triangle.merge"];
+            BOOL tempo = ip.row == 1;
+            cfg.text = tempo ? @"Tempo matching" : @"AutoMix";
+            cfg.image = [UIImage systemImageNamed:tempo ? @"metronome" : @"arrow.triangle.merge"];
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
-            sw.on = DZPrefBool(kDZAutoMix);
-            [sw addTarget:self action:@selector(toggleAutoMix:) forControlEvents:UIControlEventValueChanged];
+            sw.on = DZPrefBool(tempo ? kDZAutoMixTempo : kDZAutoMix);
+            [sw addTarget:self action:tempo ? @selector(toggleAutoMixTempo:) : @selector(toggleAutoMix:)
+                forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
             return c;
         }
@@ -676,6 +680,10 @@ static NSInteger singModelInUse(void) {
 
 - (void)toggleAutoMix:(UISwitch *)sw {
     DZPrefSet(kDZAutoMix, @(sw.on));
+}
+
+- (void)toggleAutoMixTempo:(UISwitch *)sw {
+    DZPrefSet(kDZAutoMixTempo, @(sw.on));
 }
 
 - (void)strengthChanged:(UISegmentedControl *)seg {
