@@ -4,21 +4,23 @@
 #import "DZAudioHook.h"
 #import "DZVocalModel.h"
 #import "DZDemucsModel.h"
+#import "DZAutoMix.h"
 
 #ifndef DEEZIT_VERSION
 #define DEEZIT_VERSION "dev"
 #endif
 
 // One controller, three pages:
-//   Playback Controls (player ••• menu): Slowed + Reverb switch, presets,
-//     speed, reverb, reset
+//   Playback Controls (player ••• menu): Slowed + Reverb switch, AutoMix
+//     switch, presets, speed, reverb, reset
 //   Karaoke Mode (player ••• menu, under Playback Controls): Sing - vocals,
 //     backing vocals, strength, model
 //   Settings (three-finger hold): app-level things - the Sing model download
 //     and the lock-screen covers
 typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionEffect,      // controls
-    DZSectionSing,        // karaoke: Vocals, Backing vocals, Strength, Model
+    DZSectionAutoMix,     // controls
+    DZSectionSing,       // karaoke: Vocals, Backing vocals, Strength, Model
     DZSectionPresets,     // controls
     DZSectionSpeed,       // controls
     DZSectionReverb,      // controls
@@ -147,6 +149,7 @@ static NSInteger singModelInUse(void) {
         case DZSectionSpeed:
         case DZSectionReverb:
         case DZSectionReset:
+        case DZSectionAutoMix:
             return [self isControls];
         case DZSectionModel:
         case DZSectionDemucs:
@@ -199,6 +202,7 @@ static NSInteger singModelInUse(void) {
     // slider being dragged from being reset under the finger.
     NSMutableIndexSet *sections = [NSMutableIndexSet indexSetWithIndex:DZSectionPresets];
     [sections addIndex:DZSectionEffect];
+    [sections addIndex:DZSectionAutoMix];
     [self reload:sections];
 }
 
@@ -229,7 +233,8 @@ static NSInteger singModelInUse(void) {
     if (![self shows:section]) return 0;
     switch (section) {
         case DZSectionEffect: return 1;
-        case DZSectionSing:                                     // Vocals, Backing vocals, Strength, + Model with both
+        case DZSectionAutoMix: return 1;
+        case DZSectionSing:                                    // Vocals, Backing vocals, Strength, + Model with both
             return !singReady() ? 1 : (DZLabModelInstalled(kDZLabMDX) && DZVocalModelGetState() == DZVocalModelReady ? 4 : 3);
         case DZSectionPresets: return (NSInteger)DZAllPresets().count;
         case DZSectionSpeed: return 1;
@@ -266,6 +271,12 @@ static NSInteger singModelInUse(void) {
     switch (section) {
         case DZSectionEffect:
             return [NSString stringWithFormat:@"Audio hook: %@", DZAudioBackendDescription()];
+        case DZSectionAutoMix:
+            return [NSString stringWithFormat:
+                    @"Plans every crossfade from the two songs: the next one comes in on the beat, where this one winds down. "
+                    @"Uses Apple Music's analysis of the songs and Deezit's own: Deezit learns a song the first time it plays "
+                    @"to the end (%lu so far). Songs neither knows keep Deezer's crossfade setting; skips stay instant.",
+                    (unsigned long)DZAutoMixLearnedSongs()];
         case DZSectionSing:
             return singReady()
                 ? @"Takes the singing out with an on-device AI model: Spleeter (by Deezer Research) or MDX-Net (UVR's 9482, "
@@ -315,6 +326,18 @@ static NSInteger singModelInUse(void) {
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(kDZEnabled);
             [sw addTarget:self action:@selector(toggleEnabled:) forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+            return c;
+        }
+        case DZSectionAutoMix: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            cfg.text = @"AutoMix";
+            cfg.image = [UIImage systemImageNamed:@"shuffle"];
+            c.contentConfiguration = cfg;
+            UISwitch *sw = [UISwitch new];
+            sw.on = DZPrefBool(kDZAutoMix);
+            [sw addTarget:self action:@selector(toggleAutoMix:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
             return c;
         }
@@ -495,6 +518,10 @@ static NSInteger singModelInUse(void) {
 
 - (void)toggleEnabled:(UISwitch *)sw {
     DZPrefSet(kDZEnabled, @(sw.on));
+}
+
+- (void)toggleAutoMix:(UISwitch *)sw {
+    DZPrefSet(kDZAutoMix, @(sw.on));
 }
 
 - (void)strengthChanged:(UISegmentedControl *)seg {

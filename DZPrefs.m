@@ -17,6 +17,7 @@ NSString *const kDZVocals = @"vocals";
 NSString *const kDZBackingVocals = @"backingVocals";
 NSString *const kDZSingStrength = @"singStrength";
 NSString *const kDZSingModel = @"singModel";
+NSString *const kDZAutoMix = @"autoMix";
 
 const float kDZSpeedMin = 0.50f;
 const float kDZSpeedMax = 1.50f;
@@ -48,6 +49,7 @@ static NSDictionary *defaultValues(void) {
         kDZBackingVocals: @0.0f,
         kDZSingStrength: @1,
         kDZSingModel: @0,
+        kDZAutoMix: @NO,
     };
 }
 

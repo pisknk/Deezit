@@ -24,7 +24,8 @@ Deezit_FILES = Tweak.x \
 	DZDSP.c \
 	DZAudioHook.x \
 	DZBufferProbe.x \
-	DZAutoMixProbe.x \
+	DZSongAnalysis.m \
+	DZAutoMix.x \
 	DZVocalModel.m \
 	DZDemucsModel.m \
 	DZSeparator.m \

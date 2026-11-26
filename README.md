@@ -25,6 +25,7 @@ generator (plain ObjC runtime).
 | Animated lock-screen covers | **working**: Apple Music motion covers on the lock screen via iOS 26's `MPMediaItemAnimatedArtwork` |
 | ••• menu row | **working**: "Playback Controls" and "Karaoke Mode" as the first options of the full-screen player's ••• menu |
 | Sing (AI vocal removal) | **working**, in ••• → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
+| AutoMix | **new, untested on a phone**: per-pair crossfades from Apple Music's analysis and Deezit's own, in ••• → Playback Controls |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -37,7 +38,7 @@ Deezer's audio completely alone.
 ## Opening the controls
 
 **Full-screen player → ••• → Playback Controls** opens the sound controls
-(Slowed + Reverb, presets, speed, reverb) as a half-height sheet; **••• → Karaoke
+(Slowed + Reverb, AutoMix, presets, speed, reverb) as a half-height sheet; **••• → Karaoke
 Mode**, the row under it, opens Sing (vocals, backing vocals, strength, model)
 the same way. Both sheets open
 over the player.
@@ -136,6 +137,41 @@ benchmark (iPhone 13): 49 ms per run, 24 MB, 100% Neural Engine.
 first: on an iPhone 13 it ran entirely on the CPU, 1.1 s per 2.6 s window and
 1.3 GB, too slow for live Sing.
 
+## AutoMix
+
+**••• → Playback Controls → AutoMix** plans each crossfade from the two songs.
+What it builds on, from the AutoMix probe on Deezer 11.27.0:
+
+- Deezer plays the next song on a second player node. With a crossfade of D
+  seconds it starts that song from 0:00 and fades the current one out, D
+  seconds before its end. Skips are hard cuts.
+- Deezer asks `-[DZRAudioPlayer crossFadeDurationForPlayable:followedByPlayable:]`
+  for each pair (current, next) when a song starts, when the queue changes
+  and when the setting changes.
+
+AutoMix answers that question. B's first downbeat lands on A's bar line where
+A's music winds down, kept between 1 and 12 s. It knows songs from:
+
+1. **Apple Music's audio analysis**, looked up by ISRC (bars, beats, fade-out;
+   web-player token, like the lock-screen covers). In the probe it had 4 of 5
+   songs.
+2. **Deezit's own analysis** (`DZSongAnalysis.m`): a song that plays from its
+   start to its end without a seek is analysed as Deezer decodes it (in
+   `-[DZRAudioTrackController readAudioIntoBuffer:frames:endReached:]`, about
+   3 s ahead of playback) and remembered in `Library/Application
+   Support/Deezit/AutoMix/`. It finds where the music starts and winds down
+   (level against the song's typical loudness), the tempo (onset
+   autocorrelation) and the beats (dynamic programming, after D. Ellis 2007),
+   and groups beats into bars by the low end.
+
+Where the music ends comes from Deezit's own analysis when there is one (it
+measured Deezer's file; in the probe Apple's fade-out time was about 2 s early
+for one song), bars from Apple when its release has the same length. A pair
+with nothing known about the first song keeps Deezer's crossfade setting, and
+pairs Deezer keeps gapless stay gapless. Deezer still does the fading, so
+nothing new runs in the audio path. The log shows each plan ("automix:") and,
+for songs both know, Deezit's analysis next to Apple's.
+
 ## Animated lock-screen covers
 
 On iOS 26 and later, Deezit shows the Apple Music motion cover of the album
@@ -179,6 +215,8 @@ DZSing.x / DZSeparator.*    "Sing": AI vocal removal on Deezer's buffers as they
 DZVocalModel.*              vocal model download / compile / load
 DZDemucsModel.*             model lab: MDX-Net download, benchmark, playback loading
 tools/vocal_model/          Spleeter / MDX-Net / HT-Demucs -> Core ML (vocal-model*.yml)
+DZAutoMix.x                 AutoMix: plans Deezer's crossfade per pair, learns songs as they're decoded
+DZSongAnalysis.*            song analysis (beats, bars, music start / end), Apple's analysis, the planner
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
