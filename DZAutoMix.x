@@ -58,6 +58,7 @@ static NSString *sPendingA, *sPendingB;                                // the pa
 static NSString *sLastPlan;
 static NSUInteger sLearnedHere;
 static _Atomic double sLastPlanned;   // the crossfade AutoMix last gave Deezer
+static __thread BOOL tRealSetting;    // inside our own hook: -crossFadeDuration reports Deezer's setting
 
 static BOOL autoMixOn(void) { return DZPrefBool(kDZAutoMix); }
 
@@ -370,8 +371,24 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
 
 %hook DZRAudioPlayer
 
+// Deezer's crossfade setting. When the next song starts,
+// -playNextTrackWithChange: checks it: at 0 it pauses the current song on the
+// spot instead of fading it out (-releasePlayback), whatever the pair's
+// crossfade was. So while AutoMix has planned a crossfade for the pair coming
+// up, Deezer is told the setting is that crossfade. Pairs AutoMix leaves
+// gapless (and Deezit's own reads) see the real setting.
+- (double)crossFadeDuration {
+    double real = %orig;
+    if (tRealSetting || !autoMixOn()) return real;
+    double planned = atomic_load(&sLastPlanned);
+    return planned > 0 ? MAX(real, planned) : real;
+}
+
 - (double)crossFadeDurationForPlayable:(id)a followedByPlayable:(id)b {
+    BOOL wasReal = tRealSetting;
+    tRealSetting = YES;
     double d = %orig;
+    tRealSetting = wasReal;
     if (!autoMixOn()) return d;
     sPlayer = self;
     NSString *ia = isrcOf(a), *ib = isrcOf(b);
@@ -382,7 +399,9 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
     askApple(ia, titleOf(a));
     askApple(ib, titleOf(b));
     double setting = 0;
+    tRealSetting = YES;
     @try { setting = [self crossFadeDuration]; } @catch (NSException *e) {}
+    tRealSetting = wasReal;
     NSString *key = [NSString stringWithFormat:@"%@>%@", ia ?: titleOf(a), ib ?: titleOf(b)];
     if (setting > 0.05 && d < 0.05) {
         logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": Deezer keeps this pair gapless", titleOf(a), titleOf(b)]);
@@ -493,7 +512,8 @@ void DZAutoMixInstall(void) {
         sLogged = [NSMutableDictionary dictionary];
 
         Class player = objc_getClass("DZRAudioPlayer");
-        if (!hasMethod(player, @selector(crossFadeDurationForPlayable:followedByPlayable:), "d")) {
+        if (!hasMethod(player, @selector(crossFadeDurationForPlayable:followedByPlayable:), "d") ||
+            !hasMethod(player, @selector(crossFadeDuration), "d")) {
             DZLog("automix: DZRAudioPlayer not as expected, AutoMix off");
             return;
         }
