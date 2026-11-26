@@ -7,12 +7,14 @@
 // download / ban in some contexts). -updateButtons takes the arranged views
 // out and puts back the ones the current track needs. The buttons are
 // DZRPlayerButton (a UIButton): -initWithImage:target:action:, +defaultSize,
-// and -setActive:, which shows a small dot under the icon.
+// default / highlighted / selected tint colours, which Deezer changes with the
+// cover (dark icons over a light cover).
 //
-// After every -updateButtons the three buttons go back in right after Share.
-// Tap: turns the feature on / off (the dot shows it's on). Touch and hold:
-// its sheet (Playback Controls; Karaoke Mode; AutoMix's switch is in Playback
-// Controls).
+// After every -updateButtons the three buttons go back in right after Share,
+// in the share button's current colours (followed when Deezer recolours it).
+// Tap: turns the feature on / off (filled glyph when on, outline when off,
+// like the heart). Touch and hold: its sheet (Playback Controls; Karaoke
+// Mode; AutoMix's switch is in Playback Controls).
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -38,6 +40,19 @@
 @protocol DZPlayerButtonAPI <NSObject>
 - (instancetype)initWithImage:(UIImage *)image target:(id)target action:(SEL)action;
 + (CGFloat)defaultSize;
+@optional
+- (void)setImage:(UIImage *)image;
+- (UIColor *)defaultTintColor;
+- (void)setDefaultTintColor:(UIColor *)c;
+- (UIColor *)highlightedTintColor;
+- (void)setHighlightedTintColor:(UIColor *)c;
+- (UIColor *)selectedTintColor;
+- (void)setSelectedTintColor:(UIColor *)c;
+- (void)setActive:(BOOL)active;
+@end
+
+// placeholder; %init binds it to DZRPlayerButton
+@interface DZPlayerButtonHookTarget : UIButton
 @end
 
 static NSString *const kDZPrevBackingKey = @"karaokeTapPrevBacking";
@@ -75,12 +90,21 @@ void DZPresentSheet(UIViewController *vc, DZSheet sheet) {
 
 typedef NS_ENUM(NSInteger, DZQuick) { DZQuickEffect, DZQuickKaraoke, DZQuickAutoMix, DZQuickCount };
 
-static NSString *quickSymbol(DZQuick q) {
+// Outline when off, filled when on (like Deezer's heart); the first symbol
+// this iOS has wins.
+static UIImage *quickImage(DZQuick q, BOOL on, CGFloat point) {
+    NSArray<NSString *> *names;
     switch (q) {
-        case DZQuickEffect: return @"waveform";
-        case DZQuickKaraoke: return @"music.mic";
-        default: return @"arrow.triangle.merge";
+        case DZQuickEffect: names = on ? @[@"tortoise.fill"] : @[@"tortoise"]; break;
+        case DZQuickKaraoke: names = on ? @[@"microphone.fill", @"mic.fill"] : @[@"microphone", @"mic"]; break;
+        default: names = on ? @[@"infinity.circle.fill"] : @[@"infinity.circle"]; break;
     }
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:point weight:UIImageSymbolWeightRegular];
+    for (NSString *n in names) {
+        UIImage *img = [UIImage systemImageNamed:n withConfiguration:cfg];
+        if (img) return img;
+    }
+    return [UIImage systemImageNamed:@"circle" withConfiguration:cfg];
 }
 
 static NSString *quickName(DZQuick q) {
@@ -102,7 +126,11 @@ static BOOL quickIsOn(DZQuick q) {
 @interface DZQuickButtons : NSObject
 @property (nonatomic, weak) DZRPlayerTrackActionsController *controller;
 @property (nonatomic, strong) NSArray<UIButton *> *buttons;
+@property (nonatomic) CGFloat point;
+- (void)syncLook;
 @end
+
+static void *kDZShareMirrorKey = &kDZShareMirrorKey;   // Deezer's share button -> our buttons (weak box)
 
 @implementation DZQuickButtons
 
@@ -120,9 +148,9 @@ static BOOL quickIsOn(DZQuick q) {
             if (s > 20 && s < 80) side = s;
         }
         CGFloat point = MAX(18, MIN(24, side * 0.5));
+        _point = point;
         for (NSInteger q = 0; q < DZQuickCount; q++) {
-            UIImage *img = [UIImage systemImageNamed:quickSymbol(q)
-                                   withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:point weight:UIImageSymbolWeightRegular]];
+            UIImage *img = quickImage(q, NO, point);
             UIButton *b = nil;
             if ([cls isSubclassOfClass:[UIButton class]] && [cls instancesRespondToSelector:init]) {
                 @try {
@@ -165,12 +193,41 @@ static BOOL quickIsOn(DZQuick q) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+// Filled glyph when on, outline when off (no dot).
 - (void)refresh {
-    SEL active = NSSelectorFromString(@"setActive:");
     for (UIButton *b in self.buttons) {
         BOOL on = quickIsOn(b.tag);
-        if ([b respondsToSelector:active]) ((void (*)(id, SEL, BOOL))objc_msgSend)(b, active, on);
+        UIImage *img = quickImage(b.tag, on, self.point);
+        id<DZPlayerButtonAPI> pb = (id<DZPlayerButtonAPI>)b;
+        if ([pb respondsToSelector:@selector(setActive:)]) [pb setActive:NO];
+        if ([pb respondsToSelector:@selector(setImage:)]) [pb setImage:img];
+        else [b setImage:img forState:UIControlStateNormal];
         b.accessibilityValue = on ? @"On" : @"Off";
+    }
+    [self syncLook];
+}
+
+// Deezer recolours its buttons with the cover (dark icons on a light
+// background): take whatever its share button has now.
+- (void)syncLook {
+    DZRPlayerTrackActionsController *c = self.controller;
+    UIButton *share = [c respondsToSelector:@selector(shareButton)] ? [c shareButton] : nil;
+    if (!share) return;
+    if (objc_getAssociatedObject(share, kDZShareMirrorKey) == nil) {
+        NSPointerArray *box = [NSPointerArray weakObjectsPointerArray];
+        [box addPointer:(__bridge void *)self];
+        objc_setAssociatedObject(share, kDZShareMirrorKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    id<DZPlayerButtonAPI> s = (id<DZPlayerButtonAPI>)share;
+    for (UIButton *b in self.buttons) {
+        id<DZPlayerButtonAPI> pb = (id<DZPlayerButtonAPI>)b;
+        if ([s respondsToSelector:@selector(defaultTintColor)] && [pb respondsToSelector:@selector(setDefaultTintColor:)] && s.defaultTintColor)
+            [pb setDefaultTintColor:s.defaultTintColor];
+        if ([s respondsToSelector:@selector(highlightedTintColor)] && [pb respondsToSelector:@selector(setHighlightedTintColor:)] && s.highlightedTintColor)
+            [pb setHighlightedTintColor:s.highlightedTintColor];
+        if ([s respondsToSelector:@selector(selectedTintColor)] && [pb respondsToSelector:@selector(setSelectedTintColor:)] && s.selectedTintColor)
+            [pb setSelectedTintColor:s.selectedTintColor];
+        if (share.tintColor) b.tintColor = share.tintColor;
     }
 }
 
@@ -249,6 +306,16 @@ static NSString *guardPath(void) {
 
 static BOOL sPlacedOnce;
 
+static BOOL ownsMethod(Class c, SEL s) {
+    if (!c) return NO;
+    unsigned int n = 0;
+    Method *list = class_copyMethodList(c, &n);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < n && !found; i++) found = method_getName(list[i]) == s;
+    free(list);
+    return found;
+}
+
 %group DZPlayerButtonHooks
 
 %hook DZRPlayerTrackActionsController
@@ -268,6 +335,29 @@ static BOOL sPlacedOnce;
 
 %end
 
+%group DZPlayerButtonTintHooks
+
+// Deezer's share button changed colour (the cover changed): ours follow.
+%hook DZPlayerButtonHookTarget
+
+- (void)setDefaultTintColor:(UIColor *)c {
+    %orig;
+    NSPointerArray *box = objc_getAssociatedObject(self, kDZShareMirrorKey);
+    DZQuickButtons *q = box.count ? (__bridge DZQuickButtons *)[box pointerAtIndex:0] : nil;
+    if (q) dispatch_async(dispatch_get_main_queue(), ^{ [q syncLook]; });
+}
+
+- (void)updateTintColor {
+    %orig;
+    NSPointerArray *box = objc_getAssociatedObject(self, kDZShareMirrorKey);
+    DZQuickButtons *q = box.count ? (__bridge DZQuickButtons *)[box pointerAtIndex:0] : nil;
+    if (q) dispatch_async(dispatch_get_main_queue(), ^{ [q syncLook]; });
+}
+
+%end
+
+%end
+
 void DZPlayerButtonsInstall(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -279,6 +369,11 @@ void DZPlayerButtonsInstall(void) {
         Class c = objc_getClass("DZRPlayerTrackActionsController");
         if (c && class_getInstanceMethod(c, @selector(updateButtons)) && class_getInstanceMethod(c, @selector(stackView))) {
             %init(DZPlayerButtonHooks);
+            Class button = objc_getClass("DZRPlayerButton");
+            if (ownsMethod(button, @selector(setDefaultTintColor:)) && ownsMethod(button, @selector(updateTintColor)))
+                %init(DZPlayerButtonTintHooks, DZPlayerButtonHookTarget = button);
+            else
+                DZLog("player: DZRPlayerButton not as expected, the buttons keep their first colour");
         } else {
             DZLog("player: DZRPlayerTrackActionsController not as expected, no quick buttons");
         }

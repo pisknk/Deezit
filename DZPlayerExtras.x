@@ -144,11 +144,46 @@ static void showArtistAlbumSheet(UIViewController *vc) {
     [vc presentViewController:ac animated:YES completion:nil];
 }
 
+#pragma mark - queue swipes vs. swipe back
+
+// iOS 26 navigation controllers go back on a right swipe anywhere in the
+// content (interactiveContentPopGestureRecognizer), which beats a row's
+// swipe-right Delete. While Up next is on screen that gesture is off; the
+// swipe from the left edge (interactivePopGestureRecognizer) still goes back.
+static void *kDZContentPopKey = &kDZContentPopKey;   // queue VC -> @YES when Deezit turned it off
+
+static UIGestureRecognizer *contentPop(UIViewController *vc) {
+    UINavigationController *nav = vc.navigationController;
+    SEL s = NSSelectorFromString(@"interactiveContentPopGestureRecognizer");
+    if (![nav respondsToSelector:s]) return nil;
+    id g = ((id (*)(id, SEL))objc_msgSend)(nav, s);
+    return [g isKindOfClass:[UIGestureRecognizer class]] ? g : nil;
+}
+
+static void holdContentPop(UIViewController *vc, BOOL hold) {
+    UIGestureRecognizer *g = contentPop(vc);
+    if (!g) return;
+    if (hold && g.enabled) {
+        g.enabled = NO;
+        objc_setAssociatedObject(vc, kDZContentPopKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (!hold && objc_getAssociatedObject(vc, kDZContentPopKey)) {
+        g.enabled = YES;
+        objc_setAssociatedObject(vc, kDZContentPopKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static Class sQueueClass;
+
 #pragma mark - hooks
 
 %group DZQueueSwipeHooks
 
 %hook DZRQueueListViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    holdContentPop(self, YES);
+}
 
 // Outside Edit mode Deezer answers "no editing style" for every row
 // (canDeleteRowAtIndexPath: && isDeleting), and iOS then shows no swipe
@@ -165,6 +200,20 @@ static void showArtistAlbumSheet(UIViewController *vc) {
 %new
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
     return [self tableView:tv trailingSwipeActionsConfigurationForRowAtIndexPath:ip];
+}
+
+%end
+
+%end
+
+%group DZQueueLeaveHooks
+
+// (Up next doesn't override it: hooked on UIViewController, for the queue only)
+%hook UIViewController
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    if (sQueueClass && [self isKindOfClass:sQueueClass]) holdContentPop(self, NO);
 }
 
 %end
@@ -208,7 +257,9 @@ void DZPlayerExtrasInstall(void) {
         Class queue = objc_getClass("DZRQueueListViewController");
         if (implements(queue, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:)) &&
             implements(queue, @selector(tableView:editingStyleForRowAtIndexPath:)) && implements(queue, @selector(canDeleteRowAtIndexPath:))) {
+            sQueueClass = queue;
             %init(DZQueueSwipeHooks);
+            %init(DZQueueLeaveHooks);
             DZLog("player: up next rows delete on a swipe to the right too");
         } else {
             DZLog("player: DZRQueueListViewController not as expected, no swipe-right delete");

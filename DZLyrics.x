@@ -404,38 +404,70 @@ static void *kAnimatorKey = &kAnimatorKey;
 
 #pragma mark - Karaoke Mode button
 
-// A pill, "🎤 Karaoke Mode", when the lyrics open, that shrinks to a round
-// icon button after a few seconds. Off: translucent with a white icon; on:
-// white with a dark icon. Tap: karaoke on / off; touch and hold: the sheet.
-@interface DZKaraokeButton : UIControl
+// A Liquid Glass button (iOS 26's UIButtonConfiguration glass styles, looked
+// up at runtime; a plain capsule on older iOS). When the lyrics open it's a
+// "Karaoke Mode" pill; a few seconds later the title goes and the button
+// shrinks to a circle inside a spring animation, so the glass morphs into the
+// round icon. Its colour follows Deezer's share button (dark icons over a
+// light lyrics background). Off: clear glass, outline mic; on: glass tinted
+// with that colour, filled mic. Tap: karaoke on / off; touch and hold: the
+// Karaoke Mode sheet.
+@interface DZKaraokeButton : UIButton
 @property (nonatomic, weak) UIViewController *host;
-@property (nonatomic, strong) UIImageView *icon;
-@property (nonatomic, strong) UILabel *label;
 @property (nonatomic) BOOL expanded;
 @end
 
-@implementation DZKaraokeButton
+static const CGFloat kDZPillH = 44;
 
-static const CGFloat kDZPillH = 44, kDZPillPadL = 14, kDZPillPadR = 18, kDZPillGap = 7;
+static UIColor *contrasting(UIColor *c) {
+    CGFloat r = 1, g = 1, b = 1, a = 1;
+    if (![c getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat w = 1;
+        if ([c getWhite:&w alpha:&a]) r = g = b = w;
+    }
+    return 0.299 * r + 0.587 * g + 0.114 * b > 0.6 ? [UIColor colorWithRed:27 / 255.0 green:1 / 255.0 blue:30 / 255.0 alpha:1]
+                                                    : UIColor.whiteColor;
+}
+
+static UIImage *micImage(BOOL on) {
+    UIImageSymbolConfiguration *sc = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+    for (NSString *n in on ? @[@"microphone.fill", @"mic.fill"] : @[@"microphone", @"mic"]) {
+        UIImage *img = [UIImage systemImageNamed:n withConfiguration:sc];
+        if (img) return img;
+    }
+    return nil;
+}
+
+static UIButtonConfiguration *karaokeConfiguration(BOOL on, BOOL expanded, UIColor *accent) {
+    SEL glass = NSSelectorFromString(on ? @"prominentGlassButtonConfiguration" : @"glassButtonConfiguration");
+    UIButtonConfiguration *c = nil;
+    if ([UIButtonConfiguration respondsToSelector:glass])
+        c = ((UIButtonConfiguration * (*)(id, SEL))objc_msgSend)([UIButtonConfiguration class], glass);
+    if (!c) {
+        c = on ? [UIButtonConfiguration filledButtonConfiguration] : [UIButtonConfiguration grayButtonConfiguration];
+        c.baseBackgroundColor = on ? accent : [accent colorWithAlphaComponent:0.16];
+    }
+    c.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    c.image = micImage(on);
+    c.imagePadding = 7;
+    c.title = expanded ? @"Karaoke Mode" : nil;
+    c.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *in) {
+        NSMutableDictionary *out = [in mutableCopy];
+        out[NSFontAttributeName] = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        return out;
+    };
+    c.contentInsets = expanded ? NSDirectionalEdgeInsetsMake(11, 15, 11, 18) : NSDirectionalEdgeInsetsMake(11, 11, 11, 11);
+    c.baseForegroundColor = on ? contrasting(accent) : accent;
+    return c;
+}
+
+@implementation DZKaraokeButton
 
 + (instancetype)buttonForHost:(UIViewController *)host {
     DZKaraokeButton *b = [[self alloc] initWithFrame:CGRectMake(0, 0, kDZPillH, kDZPillH)];
     b.host = host;
-    b.clipsToBounds = YES;
-    b.icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"music.mic"
-        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold]]];
-    b.icon.contentMode = UIViewContentModeCenter;
-    b.label = [UILabel new];
-    b.label.text = @"Karaoke Mode";
-    b.label.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    [b.label sizeToFit];
-    for (UIView *v in @[b.icon, b.label]) {
-        v.userInteractionEnabled = NO;
-        [b addSubview:v];
-    }
     b.isAccessibilityElement = YES;
     b.accessibilityLabel = @"Karaoke Mode";
-    b.accessibilityTraits = UIAccessibilityTraitButton;
     b.accessibilityHint = @"Removes the lead vocals. Touch and hold for options.";
     [b addTarget:b action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
     [b addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:b action:@selector(held:)]];
@@ -448,39 +480,22 @@ static const CGFloat kDZPillH = 44, kDZPillPadL = 14, kDZPillPadR = 18, kDZPillG
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (CGFloat)preferredWidth {
-    if (!self.expanded) return kDZPillH;
-    return kDZPillPadL + 22 + kDZPillGap + self.label.bounds.size.width + kDZPillPadR;
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat h = self.bounds.size.height;
-    self.layer.cornerRadius = h / 2;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
-    CGFloat iconX = self.expanded ? kDZPillPadL + 11 : self.bounds.size.width / 2;
-    self.icon.center = CGPointMake(iconX, h / 2);
-    self.icon.bounds = CGRectMake(0, 0, 24, 24);
-    CGRect lf = self.label.frame;
-    lf.origin = CGPointMake(kDZPillPadL + 22 + kDZPillGap, (h - lf.size.height) / 2);
-    self.label.frame = lf;
-    self.label.alpha = self.expanded ? 1 : 0;
+- (UIColor *)accent {
+    UIView *share = kv(self.host, @"sharingButton");
+    return [share isKindOfClass:[UIView class]] && share.tintColor ? share.tintColor : UIColor.whiteColor;
 }
 
 - (void)refresh {
     BOOL on = DZKaraokeIsOn();
-    UIColor *fg = on ? [UIColor colorWithRed:27 / 255.0 green:1 / 255.0 blue:30 / 255.0 alpha:1] : UIColor.whiteColor;
-    self.backgroundColor = on ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.16];
-    self.icon.tintColor = fg;
-    self.label.textColor = fg;
+    UIColor *accent = [self accent];
+    self.tintColor = accent;   // the prominent glass takes its tint from here
+    self.configuration = karaokeConfiguration(on, self.expanded, accent);
     self.accessibilityValue = on ? @"On" : @"Off";
 }
 
-- (void)setHighlighted:(BOOL)highlighted {
-    [super setHighlighted:highlighted];
-    [UIView animateWithDuration:0.15 animations:^{
-        self.transform = highlighted ? CGAffineTransformMakeScale(0.94, 0.94) : CGAffineTransformIdentity;
-    }];
+- (CGFloat)preferredWidth {
+    if (!self.expanded) return kDZPillH;
+    return MAX(kDZPillH, ceil([self sizeThatFits:CGSizeMake(400, kDZPillH)].width));
 }
 
 - (void)tapped {
@@ -511,7 +526,8 @@ static void layoutKaraokeButton(UIViewController *vc) {
     if (!b) {
         b = [DZKaraokeButton buttonForHost:vc];
         objc_setAssociatedObject(vc, kKaraokeButtonKey, b, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        DZLog("lyrics: Karaoke Mode button added");
+        DZLog("lyrics: Karaoke Mode button added (%@)",
+              [UIButtonConfiguration respondsToSelector:NSSelectorFromString(@"glassButtonConfiguration")] ? @"Liquid Glass" : @"capsule");
     }
     UIView *container = share.superview;
     if (b.superview != container) {
@@ -524,28 +540,32 @@ static void layoutKaraokeButton(UIViewController *vc) {
     b.frame = CGRectMake(gap, CGRectGetMidY(f) - kDZPillH / 2, [b preferredWidth], kDZPillH);
     b.hidden = share.hidden;
     b.alpha = share.alpha;
+    // Deezer recolours the share button with the lyrics background
+    if (![b.tintColor isEqual:share.tintColor]) [b refresh];
 }
 
-// The lyrics just opened: show the pill, then shrink it to the icon.
+// The lyrics just opened: the pill, then the morph into the round icon.
 static void showKaraokePill(UIViewController *vc) {
     DZKaraokeButton *b = objc_getAssociatedObject(vc, kKaraokeButtonKey);
     if (!b) return;
-    b.expanded = YES;
-    layoutKaraokeButton(vc);
-    [b setNeedsLayout];
-    [b layoutIfNeeded];
+    [UIView performWithoutAnimation:^{
+        b.expanded = YES;
+        [b refresh];
+        layoutKaraokeButton(vc);
+        [b layoutIfNeeded];
+    }];
     __weak DZKaraokeButton *weakB = b;
     __weak UIViewController *weakVC = vc;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         DZKaraokeButton *bb = weakB;
         UIViewController *v = weakVC;
         if (!bb || !v || !bb.expanded) return;
-        [UIView animateWithDuration:0.55 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0
+        [UIView animateWithDuration:0.6 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0
                             options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
             bb.expanded = NO;
+            [bb refresh];
             layoutKaraokeButton(v);
-            [bb setNeedsLayout];
             [bb layoutIfNeeded];
         } completion:nil];
     });
