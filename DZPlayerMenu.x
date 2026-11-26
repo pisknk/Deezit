@@ -347,6 +347,7 @@ static NSIndexPath *deezerPath(NSIndexPath *ip) {
 static void (^sCapture)(UIViewController *presenter, UIViewController *vc);
 static BOOL sBypass;                          // our own presentation of Deezer's sheet
 static __weak UIViewController *sNativePlayer;
+static __weak UIViewController *sDetachedPresenter;   // who Deezer meant to present the sheet from
 static void *kDZDetachedKey = &kDZDetachedKey;   // Deezer's sheet, read but not shown
 static void *kDZNativeItemKey = &kDZNativeItemKey; // ••• item -> its original action (when the menu is on)
 
@@ -396,16 +397,17 @@ static void showSheet(DZMenuContext *ctx, void (^then)(void)) {
     sBypass = NO;
 }
 
+// Every row runs in Deezer's unseen sheet. A row that opens a page pushes it
+// inside the sheet (Add to Playlist, Share… have no chevron, so it can't be
+// told in advance): the push hook below then shows the sheet on that page.
 static void runRow(DZMenuContext *ctx, NSIndexPath *ip, BOOL opensPage, NSString *title) {
     UITableView *tv = ctx.table;
     id<UITableViewDelegate> d = tv.delegate;
     if (![d respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) return;
-    DZLog("menu: native menu → \"%@\"%@", title, opensPage ? @" (opens Deezer's sheet on it)" : @"");
-    if (opensPage) {
-        showSheet(ctx, ^{ [d tableView:tv didSelectRowAtIndexPath:ip]; });
-    } else {
-        [d tableView:tv didSelectRowAtIndexPath:ip];
-    }
+    DZLog("menu: native menu → \"%@\"%@", title, opensPage ? @" (chevron)" : @"");
+    objc_setAssociatedObject(ctx.sheet, kDZMenuFlagKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    sDetachedPresenter = ctx.presenter;
+    [d tableView:tv didSelectRowAtIndexPath:ip];
 }
 
 static NSString *rowTitle(UITableViewCell *cell) {
@@ -766,6 +768,29 @@ static void applyNativeMenu(UIViewController *player) {
         return;
     }
     %orig;
+}
+
+%end
+
+%hook UINavigationController
+
+// A row of the native menu opened a page inside Deezer's unseen sheet: show
+// the sheet, already on that page.
+- (void)pushViewController:(UIViewController *)vc animated:(BOOL)animated {
+    if (!vc || !isDetached(self) || self.view.window) {
+        %orig;
+        return;
+    }
+    UIViewController *sheet = self;
+    while (sheet.parentViewController) sheet = sheet.parentViewController;
+    %orig(vc, NO);
+    UIViewController *presenter = sDetachedPresenter.view.window ? sDetachedPresenter : topOf(sNativePlayer);
+    if (!presenter || sheet.presentingViewController) return;
+    DZLog("menu: the row opened %@, showing Deezer's sheet on it", NSStringFromClass([vc class]));
+    setDetached(sheet, NO);
+    sBypass = YES;
+    [presenter presentViewController:sheet animated:YES completion:nil];
+    sBypass = NO;
 }
 
 %end

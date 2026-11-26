@@ -21,6 +21,7 @@
 
 @interface DZRQueueListViewController : UIViewController
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip;
+- (BOOL)canDeleteRowAtIndexPath:(NSIndexPath *)ip;
 @end
 
 @interface DZRPlayerMainViewController : UIViewController
@@ -149,6 +150,17 @@ static void showArtistAlbumSheet(UIViewController *vc) {
 
 %hook DZRQueueListViewController
 
+// Outside Edit mode Deezer answers "no editing style" for every row
+// (canDeleteRowAtIndexPath: && isDeleting), and iOS then shows no swipe
+// actions at all. Rows Deezer can delete (canDeleteRowAtIndexPath:: the queue
+// is editable and it isn't the song playing) get the delete style, so both
+// swipes work; Edit mode keeps Deezer's own answer.
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tv editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
+    if (!tv.isEditing && [self respondsToSelector:@selector(canDeleteRowAtIndexPath:)] && [self canDeleteRowAtIndexPath:ip])
+        return UITableViewCellEditingStyleDelete;
+    return %orig;
+}
+
 // a swipe to the right: Deezer's own Delete, as on a swipe to the left
 %new
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
@@ -194,7 +206,8 @@ void DZPlayerExtrasInstall(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class queue = objc_getClass("DZRQueueListViewController");
-        if (implements(queue, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:))) {
+        if (implements(queue, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:)) &&
+            implements(queue, @selector(tableView:editingStyleForRowAtIndexPath:)) && implements(queue, @selector(canDeleteRowAtIndexPath:))) {
             %init(DZQueueSwipeHooks);
             DZLog("player: up next rows delete on a swipe to the right too");
         } else {

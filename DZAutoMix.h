@@ -7,3 +7,8 @@
 void DZAutoMixInstall(void);
 NSString *DZAutoMixStatus(void);          // one line for the debug panel
 NSUInteger DZAutoMixLearnedSongs(void);   // songs Deezit has analysed itself
+
+@class AVAudioPlayerNode, AVAudioPCMBuffer;
+// From the buffer probe: a buffer Deezer is scheduling on a player node (the
+// song it belongs to is known from the read just before it, on that thread).
+void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer);

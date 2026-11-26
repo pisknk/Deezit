@@ -23,6 +23,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#include <stdatomic.h>
 #import "DZLog.h"
 #import "DZPrefs.h"
 #import "DZAppleMusic.h"
@@ -56,12 +57,26 @@ static __weak DZRAudioPlayer *sPlayer;
 static NSString *sPendingA, *sPendingB;                                // the pair Deezer asked about last
 static NSString *sLastPlan;
 static NSUInteger sLearnedHere;
+static _Atomic double sLastPlanned;   // the crossfade AutoMix last gave Deezer
 
 static BOOL autoMixOn(void) { return DZPrefBool(kDZAutoMix); }
 
 static id kv(id o, NSString *key) {
     if (!o || ![o respondsToSelector:NSSelectorFromString(key)]) return nil;
     @try { return [o valueForKey:key]; } @catch (NSException *e) { return nil; }
+}
+
+// Consecutive tracks of one album (track n then n + 1, or the next disc's
+// first): Deezer plays them gapless with its crossfade on, so AutoMix does too.
+static BOOL sameAlbumInOrder(id a, id b) {
+    id pa = kv(a, @"albumId") ? a : kv(a, @"playableObject"), pb = kv(b, @"albumId") ? b : kv(b, @"playableObject");
+    id albumA = kv(pa, @"albumId"), albumB = kv(pb, @"albumId");
+    NSString *x = [albumA description], *y = [albumB description];
+    if (!albumA || !albumB || !x.length || ![x isEqualToString:y]) return NO;
+    NSInteger ta = [kv(pa, @"trackNumber") integerValue], tb = [kv(pb, @"trackNumber") integerValue];
+    NSInteger da = [kv(pa, @"discNumber") integerValue], db = [kv(pb, @"discNumber") integerValue];
+    if (ta <= 0 || tb <= 0) return NO;
+    return (da == db && tb == ta + 1) || (db == da + 1 && tb == 1);
 }
 
 // DeezerTrack, or a DZRDownloadableObject wrapping one
@@ -215,6 +230,7 @@ static void logPlan(NSString *key, double value, NSString *line) {
 @interface DZTrackListen : NSObject
 @property (nonatomic, copy) NSString *isrc, *title;
 @property (nonatomic, strong) DZSongAnalyzer *analyzer;
+@property (nonatomic, weak) id controller;   // the DZRAudioTrackController decoding it
 @property (nonatomic) BOOL off;    // not from the start, seeked, already known, unusable audio
 @property (nonatomic) BOOL done;
 @end
@@ -232,6 +248,7 @@ static void beginListening(id controller, id track, double startPosition) {
     DZTrackListen *l = [DZTrackListen new];
     l.isrc = isrcOf(track);
     l.title = titleOf(track);
+    l.controller = controller;
     if (!l.isrc || startPosition > 0.05) {
         l.off = YES;
     } else {
@@ -278,20 +295,13 @@ static void learn(DZTrackListen *l, DZSongAnalyzer *an, double expected) {
     dispatch_async(dispatch_get_main_queue(), ^{ refreshIfPending(isrc); });
 }
 
-static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
-    DZTrackListen *l = objc_getAssociatedObject(controller, kListenKey);
-    if (!l) return;
+// One buffer of the song into its analysis; the last one starts the learning.
+static void feed(DZTrackListen *l, AVAudioPCMBuffer *pb, unsigned int frames, BOOL end) {
     DZSongAnalyzer *an = nil;
     @synchronized (l) {
         if (l.off || l.done) return;
-        AVAudioPCMBuffer *pb = [buffer isKindOfClass:[AVAudioPCMBuffer class]] ? buffer : nil;
-        if (!pb || pb.format.commonFormat != AVAudioPCMFormatFloat32 || pb.format.isInterleaved || !pb.floatChannelData) {
+        if (pb.format.commonFormat != AVAudioPCMFormatFloat32 || pb.format.isInterleaved || !pb.floatChannelData) {
             l.off = YES;
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-                DZLog("automix: Deezer decodes into %@ (%@), not float32 channels: own analysis off",
-                      buffer ? NSStringFromClass([buffer class]) : @"nil", pb ? (id)pb.format : @"-");
-            });
             return;
         }
         if (!l.analyzer) l.analyzer = [[DZSongAnalyzer alloc] initWithSampleRate:pb.format.sampleRate];
@@ -302,8 +312,56 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
         an = l.analyzer;
     }
     double expected = 0;
-    @try { expected = [(DZRAudioTrackController *)controller totalDuration]; } @catch (NSException *e) {}
+    id controller = l.controller;
+    @try { expected = controller ? [(DZRAudioTrackController *)controller totalDuration] : 0; } @catch (NSException *e) {}
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ learn(l, an, expected); });
+}
+
+// Deezer 11.27.0 decodes into CommonAudio.StereoBufferList, not an
+// AVAudioPCMBuffer, then copies that into the AVAudioPCMBuffer it schedules on
+// the song's player node. So a read only marks, on its thread, which song the
+// next scheduled buffer belongs to; the buffer probe hands that buffer over
+// (DZAutoMixScheduledBuffer) and the node remembers the song.
+static __thread __unsafe_unretained DZTrackListen *tPending;
+static __thread BOOL tPendingEnd;
+static void *kNodeListenKey = &kNodeListenKey;
+static _Atomic long sUnlinked, sLinked;
+
+static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
+    DZTrackListen *l = objc_getAssociatedObject(controller, kListenKey);
+    if (!l) return;
+    @synchronized (l) {
+        if (l.off || l.done) return;
+    }
+    if ([buffer isKindOfClass:[AVAudioPCMBuffer class]]) {
+        feed(l, buffer, frames, end);
+        return;
+    }
+    tPending = l;
+    tPendingEnd = end;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        DZLog("automix: Deezer decodes into %@: learning from the buffers it schedules instead",
+              buffer ? NSStringFromClass([buffer class]) : @"nil");
+    });
+}
+
+void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer) {
+    if (!node || !buffer) return;
+    DZTrackListen *l = tPending;
+    BOOL end = tPendingEnd;
+    tPending = nil;
+    tPendingEnd = NO;
+    if (l) {
+        if (objc_getAssociatedObject(node, kNodeListenKey) != l)
+            objc_setAssociatedObject(node, kNodeListenKey, l, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        atomic_fetch_add(&sLinked, 1);
+    } else {
+        l = objc_getAssociatedObject(node, kNodeListenKey);
+        if (atomic_fetch_add(&sUnlinked, 1) == 400 && atomic_load(&sLinked) == 0)
+            DZLog("automix: Deezer's reads and schedules happen on different threads: Deezit can't learn songs");
+    }
+    if (l) feed(l, buffer, buffer.frameLength, end);
 }
 
 #pragma mark - hooks
@@ -330,6 +388,11 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
         logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": Deezer keeps this pair gapless", titleOf(a), titleOf(b)]);
         return d;
     }
+    if (sameAlbumInOrder(a, b)) {
+        logPlan(key, 0, [NSString stringWithFormat:@"\"%@\" → \"%@\": next track of the same album, kept gapless", titleOf(a), titleOf(b)]);
+        atomic_store(&sLastPlanned, 0.0);
+        return 0;
+    }
     NSString *noteA, *noteB, *why;
     DZSongInfo *infoA = knowledge(ia, &noteA), *infoB = knowledge(ib, &noteB);
     double durA = 0;
@@ -340,10 +403,12 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
     if (planned < 0) {
         logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": nothing known about \"%@\" yet, Deezer's %.1f s",
                          titleOf(a), titleOf(b), titleOf(a), d]);
+        atomic_store(&sLastPlanned, 0.0);
         return d;
     }
     logPlan(key, planned, [NSString stringWithFormat:@"\"%@\" → \"%@\": crossfade %.1f s (Deezer's setting %.1f s) · %@ · A: %@, B: %@",
                            titleOf(a), titleOf(b), planned, setting, why, noteA ?: @"-", noteB ?: @"nothing known"]);
+    atomic_store(&sLastPlanned, planned);
     return planned;
 }
 
@@ -378,6 +443,26 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
 
 - (void)audioDecoderDidSeek:(id)decoder fromFrame:(unsigned long long)from toFrame:(unsigned long long)to sampleRate:(float)rate {
     stopListening(self, to);
+    %orig;
+}
+
+// Deezer fades the next song in over the whole crossfade (its
+// applyCrossFadeDurationForNextTrackChange gives both fades the same length),
+// so with a song already winding down the middle of the overlap goes quiet.
+// AutoMix's crossfades bring the next song in faster: 40 % of the overlap,
+// 1 to 3 s; the current song still fades over all of it.
+- (void)setPlaybackAttackDuration:(double)d {
+    double planned = atomic_load(&sLastPlanned);
+    if (autoMixOn() && planned > 0 && fabs(d - planned) < 0.01) {
+        double attack = MAX(1.0, MIN(3.0, 0.4 * d));
+        static double lastLogged;
+        if (fabs(lastLogged - d) > 0.01) {
+            lastLogged = d;
+            DZLog("automix: next song fades in over %.1f s (Deezer asked %.1f s)", attack, d);
+        }
+        %orig(attack);
+        return;
+    }
     %orig;
 }
 
@@ -417,7 +502,7 @@ void DZAutoMixInstall(void) {
         Class controller = objc_getClass("DZRAudioTrackController");
         SEL need[] = { @selector(prepareToPlayTrack:ofCollection:), @selector(prepareToPlayTrack:ofCollection:startingTimePosition:userInfo:),
                        @selector(loadTrack:ofCollection:startingTimePosition:), @selector(audioDecoderDidSeek:fromFrame:toFrame:sampleRate:),
-                       @selector(rewindByRepeating:userInfo:) };
+                       @selector(rewindByRepeating:userInfo:), @selector(setPlaybackAttackDuration:) };
         BOOL ok = hasMethod(controller, @selector(readAudioIntoBuffer:frames:endReached:), "I");
         for (size_t i = 0; i < sizeof(need) / sizeof(need[0]); i++) ok = ok && hasMethod(controller, need[i], "v");
         if (ok) %init(DZAutoMixListen);

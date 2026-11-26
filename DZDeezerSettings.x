@@ -162,20 +162,18 @@ static UIScrollView *mainScrollView(UIView *root) {
     return best;
 }
 
+// SwiftUI resets the scroll view's insets, so the card makes room by making
+// the content itself taller: every content size SwiftUI sets (its own height,
+// kept in kDZCardInsetKey) gets the card's height added, and the card sits at
+// SwiftUI's height.
+static CGFloat cardBlockHeight(void) {
+    return kDZGapAbove + kDZHeaderH + kDZRowH + kDZGapBelow;
+}
+
 static void layoutCard(UIScrollView *sv, UIView *card) {
-    CGFloat h = kDZGapAbove + kDZHeaderH + kDZRowH;
-    card.frame = CGRectMake(0, sv.contentSize.height, sv.bounds.size.width, h);
     NSNumber *base = objc_getAssociatedObject(sv, kDZCardInsetKey);
-    if (!base) {
-        base = @(sv.contentInset.bottom);
-        objc_setAssociatedObject(sv, kDZCardInsetKey, base, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    UIEdgeInsets in = sv.contentInset;
-    CGFloat want = base.doubleValue + h + kDZGapBelow;
-    if (fabs(in.bottom - want) > 0.5) {
-        in.bottom = want;
-        sv.contentInset = in;
-    }
+    CGFloat swiftUIHeight = base ? base.doubleValue : sv.contentSize.height;
+    card.frame = CGRectMake(0, swiftUIHeight, sv.bounds.size.width, kDZGapAbove + kDZHeaderH + kDZRowH);
 }
 
 static void dumpViews(UIView *v, int depth, NSMutableString *out, int *budget) {
@@ -222,6 +220,10 @@ static void attachCard(UIViewController *vc, NSString *when) {
         [card removeFromSuperview];
         [sv addSubview:card];
         objc_setAssociatedObject(sv, kDZCardKey, card, OBJC_ASSOCIATION_ASSIGN);
+        // re-set SwiftUI's height so the hook below adds the card's
+        NSNumber *base = objc_getAssociatedObject(sv, kDZCardInsetKey);
+        CGSize size = sv.contentSize;
+        sv.contentSize = CGSizeMake(size.width, base ? base.doubleValue : size.height);
         DZLog("settings: Deezit card added to Deezer's Settings (%@, in %@ %.0fx%.0f)", when,
               NSStringFromClass([sv class]), sv.bounds.size.width, sv.bounds.size.height);
     }
@@ -257,11 +259,16 @@ static void attachCard(UIViewController *vc, NSString *when) {
 
 %hook UIScrollView
 
-// keeps the card under the content when SwiftUI resizes it
+// keeps room for the card under SwiftUI's content, and the card there
 - (void)setContentSize:(CGSize)size {
-    %orig;
     UIView *card = objc_getAssociatedObject(self, kDZCardKey);
-    if (card && card.superview == self) layoutCard(self, card);
+    if (!card || card.superview != self) {
+        %orig;
+        return;
+    }
+    objc_setAssociatedObject(self, kDZCardInsetKey, @(size.height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(CGSizeMake(size.width, size.height + cardBlockHeight()));
+    layoutCard(self, card);
 }
 
 %end

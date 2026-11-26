@@ -23,6 +23,7 @@
 #include <float.h>
 #import "DZLog.h"
 #import "DZPrefs.h"
+#import "DZAutoMix.h"
 
 @interface DZNodeStats : NSObject {
 @public
@@ -155,6 +156,7 @@ static void noteSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAu
         }
         maybeSummarize(s, now);
     }
+    DZAutoMixScheduledBuffer(node, buffer);   // AutoMix learns songs from these
 }
 
 static AVAudioNodeCompletionHandler wrapPlain(AVAudioPlayerNode *node, AVAudioFrameCount frames, AVAudioNodeCompletionHandler orig) {
