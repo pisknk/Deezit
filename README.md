@@ -229,8 +229,12 @@ Deezit's analysis next to Apple's.
   artist when there are several) and "Go to <album>", through Deezer's own
   `dzrGoToArtist:` / `dzrGoToAlbum:`.
 - **Player buttons** (`DZPlayerButtons.x`): Slowed + Reverb, Karaoke Mode
-  and AutoMix next to Share, in Deezer's own `DZRPlayerButton` (its dot shows
-  what's on). Tap: on / off; touch and hold: the feature's sheet.
+  and AutoMix next to Share, in Deezer's own `DZRPlayerButton`, with icons
+  from Deezer's own icon set, Tempo (`Tempo_Tempo.bundle` in the app, loaded
+  at runtime): `gauge`, `microphoneMusic`, `noteDouble`, filled when on
+  (`microphoneMusicFill`, `noteDoubleFill`; Tempo has no filled gauge, so it's
+  cut out of a solid disc). SF Symbols if Tempo isn't found. The row is spaced
+  evenly. Tap: on / off; touch and hold: the feature's sheet.
 - **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`): a
   "Karaoke Mode" pill that shrinks to a round icon. Tap: lead vocals to 0 %
   with the backing vocals kept; tap again to undo. Touch and hold: the

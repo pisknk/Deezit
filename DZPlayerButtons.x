@@ -90,10 +90,74 @@ void DZPresentSheet(UIViewController *vc, DZSheet sheet) {
 
 typedef NS_ENUM(NSInteger, DZQuick) { DZQuickEffect, DZQuickKaraoke, DZQuickAutoMix, DZQuickCount };
 
-// Outline when off, filled when on (like Deezer's heart); the first symbol
-// this iOS has wins. The tortoise is about twice as wide as it is tall, so it
-// is drawn smaller to sit in the row like the other icons.
+// Deezer's own icon set, Tempo (Tempo_Tempo.bundle in the app: vector icons
+// named like "heart.medium" / "heartFill.medium", the ones its player row
+// uses), loaded from Deezer's bundle at runtime. "medium" unless the share
+// button's icon is closer to the "small" size.
+static NSString *sTempoSize = @"medium";
+
+static NSBundle *tempoBundle(void) {
+    static NSBundle *bundle;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURL *url = [NSBundle.mainBundle URLForResource:@"Tempo_Tempo" withExtension:@"bundle"];
+        bundle = url ? [NSBundle bundleWithURL:url] : nil;
+    });
+    return bundle;
+}
+
+static UIImage *tempoImage(NSString *name, NSString *size) {
+    NSBundle *b = tempoBundle();
+    UIImage *img = b ? [UIImage imageNamed:[NSString stringWithFormat:@"%@.%@", name, size] inBundle:b compatibleWithTraitCollection:nil] : nil;
+    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+// Tempo has no filled gauge: "on" is a solid disc with the gauge cut out of it
+// (Deezer's filled icons are solid shapes too).
+static UIImage *cutOutDisc(UIImage *glyph) {
+    CGSize size = glyph.size;
+    if (size.width < 1 || size.height < 1) return glyph;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGFloat d = MIN(size.width, size.height) - 1;
+        CGRect circle = CGRectMake((size.width - d) / 2, (size.height - d) / 2, d, d);
+        [UIColor.blackColor setFill];
+        [[UIBezierPath bezierPathWithOvalInRect:circle] fill];
+        CGRect inner = CGRectInset(circle, d * 0.19, d * 0.19);
+        [glyph drawInRect:inner blendMode:kCGBlendModeDestinationOut alpha:1];
+    }];
+    return [out imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+// Karaoke: microphoneMusic(Fill); AutoMix: noteDouble(Fill); Slowed + Reverb:
+// gauge (outline) / the cut-out disc (on). Nil when Tempo isn't there.
+static UIImage *deezerIcon(DZQuick q, BOOL on) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSString *key = [NSString stringWithFormat:@"%ld-%d-%@", (long)q, on, sTempoSize];
+    UIImage *img = [cache objectForKey:key];
+    if (img) return img;
+    switch (q) {
+        case DZQuickKaraoke: img = tempoImage(on ? @"microphoneMusicFill" : @"microphoneMusic", sTempoSize); break;
+        case DZQuickAutoMix: img = tempoImage(on ? @"noteDoubleFill" : @"noteDouble", sTempoSize); break;
+        default: {
+            UIImage *gauge = tempoImage(@"gauge", sTempoSize);
+            img = on && gauge ? cutOutDisc(gauge) : gauge;
+            break;
+        }
+    }
+    if (img) [cache setObject:img forKey:key];
+    return img;
+}
+
+// Deezer's Tempo icon when it has it, else an SF Symbol: outline when off,
+// filled when on (like Deezer's heart); the first symbol this iOS has wins.
+// The tortoise is about twice as wide as it is tall, so it is drawn smaller to
+// sit in the row like the other icons.
 static UIImage *quickImage(DZQuick q, BOOL on, CGFloat point) {
+    UIImage *tempo = deezerIcon(q, on);
+    if (tempo) return tempo;
     if (q == DZQuickEffect) point = round(point * 0.8);
     NSArray<NSString *> *names;
     switch (q) {
@@ -153,6 +217,14 @@ static void *kDZShareMirrorKey = &kDZShareMirrorKey;   // Deezer's share button 
         }
         CGFloat point = MAX(18, MIN(24, side * 0.5));
         _point = point;
+        // Tempo's size closest to the share button's icon
+        UIImage *shareIcon = share.currentImage ?: share.imageView.image;
+        UIImage *small = tempoImage(@"share", @"small"), *medium = tempoImage(@"share", @"medium");
+        if (shareIcon.size.height > 0 && small && medium)
+            sTempoSize = fabs(small.size.height - shareIcon.size.height) < fabs(medium.size.height - shareIcon.size.height) ? @"small" : @"medium";
+        DZLog("player: icons from %@ (share icon %.0f pt, Tempo small %.0f / medium %.0f pt)",
+              deezerIcon(DZQuickKaraoke, NO) ? [NSString stringWithFormat:@"Deezer's Tempo set, %@", sTempoSize] : @"SF Symbols (Tempo not found)",
+              shareIcon.size.height, small.size.height, medium.size.height);
         for (NSInteger q = 0; q < DZQuickCount; q++) {
             UIImage *img = quickImage(q, NO, point);
             UIButton *b = nil;
