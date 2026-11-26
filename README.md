@@ -167,6 +167,22 @@ A's music winds down, kept between 1 and 12 s. It knows songs from:
    autocorrelation) and the beats (dynamic programming, after D. Ellis 2007),
    and groups beats into bars by the low end.
 
+**Transitions** (`DZTransitionFX.c`): Deezit processes the buffers Deezer
+schedules on the two songs' player nodes (about 3 s ahead, by song position),
+so a change is more than a volume crossfade. Per pair it picks:
+
+- **bass swap** when the tempos are within 6 % (half / double time counts):
+  B plays 2-4 bars without bass, then on A's bar line A's bass is pulled out
+  and B's drops in;
+- **echo out** when A has bars: A's last beats repeat on a ¾-beat echo with
+  darkening repeats and A drops out on the bar B's first downbeat lands on;
+- **filter fade** otherwise: A closes into a low-pass, B opens from a
+  high-pass.
+
+B's part only runs once Deezer has really started the crossfade (never after
+a skip). There's no time-stretching: tempos aren't matched, so the overlap
+stays short when they differ.
+
 Where the music ends comes from Deezit's own analysis when there is one (it
 measured Deezer's file; in the probe Apple's fade-out time was about 2 s early
 for one song), bars from Apple when its release has the same length. A pair
