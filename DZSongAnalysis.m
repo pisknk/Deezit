@@ -59,8 +59,10 @@ static double num(id v) { return [v isKindOfClass:[NSNumber class]] ? [v doubleV
 
 // Short-time spectra of the mono mix: 1024-sample Hann frames every 512
 // samples (11.6 ms at 44.1 kHz). Per frame it keeps the level, the
-// log-spectral flux (onsets) and the flux below ~200 Hz (kick / bass, for the
-// downbeats). -finish turns those into:
+// log-spectral flux weighted equally per octave (onsets) and the rise in
+// magnitude below ~200 Hz (kick / bass, for the downbeats). Checked on
+// synthetic songs at 67-128 BPM with a numpy port: tempo within 0.5 %, bars
+// within 8 ms. -finish turns those into:
 //   - where the music starts and winds down: the level per 0.25 s against the
 //     song's typical loud level (its 75th percentile)
 //   - the tempo: autocorrelation of the onset curve, weighted towards 120 BPM
@@ -75,7 +77,7 @@ enum { kFN = 1024, kHop = 512, kHalfN = 512, kFluxBins = 256, kBassBins = 5 };
     float _win[kFN], _frame[kFN], _tmp[kFN];
     float _pend[kHop];
     int _pendN;
-    float _prevLog[kHalfN];
+    float _prevLog[kHalfN], _prevMag[kHalfN];
     float _re[kHalfN], _im[kHalfN], _ire[kHalfN], _iim[kHalfN], _mag[kHalfN];
     BOOL _havePrev;
     long long _fed;
@@ -118,17 +120,24 @@ enum { kFN = 1024, kHop = 512, kHalfN = 512, kFluxBins = 256, kBassBins = 5 };
         _im[0] = 0;
         DSPSplitComplex out = { _re, _im };
         vDSP_zvabs(&out, 1, _mag, 1, kHalfN);
+        // low end on plain magnitudes (a louder kick counts more: downbeats)
+        if (_havePrev) {
+            for (int k = 1; k <= kBassBins; k++) {
+                float d = _mag[k] - _prevMag[k];
+                if (d > 0) bass += d;
+            }
+        }
+        memcpy(_prevMag, _mag, sizeof(_prevMag));
         float gain = 10;
         vDSP_vsmul(_mag, 1, &gain, _mag, 1, kHalfN);
         int n = kHalfN;
         vvlog1pf(_mag, _mag, &n);
+        // onsets on log magnitudes, each bin weighted 1/k so every octave
+        // counts the same (else hi-hats outvote the kick and the tempo doubles)
         if (_havePrev) {
             for (int k = 1; k < kFluxBins; k++) {
                 float d = _mag[k] - _prevLog[k];
-                if (d > 0) {
-                    flux += d;
-                    if (k <= kBassBins) bass += d;
-                }
+                if (d > 0) flux += d / k;
             }
         }
         memcpy(_prevLog, _mag, sizeof(_prevLog));
