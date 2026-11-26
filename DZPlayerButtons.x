@@ -390,7 +390,6 @@ static void evenRow(UIStackView *stack, DZQuickButtons *q, UIButton *share) {
               (long)was, stack.spacing, hiddenNote, [row componentsJoinedByString:@", "]);
     });
 }
-}
 
 // Puts the buttons back right after Share (Deezer has just rebuilt the row).
 static void placeButtons(DZRPlayerTrackActionsController *c) {
