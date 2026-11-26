@@ -27,7 +27,8 @@ typedef NS_ENUM(NSInteger, DZSection) {
     DZSectionReset,       // controls
     DZSectionModel,       // settings: Sing model download
     DZSectionDemucs,      // settings: experimental model lab (MDX-Net) + benchmark
-    DZSectionLockScreen,  // settings
+    DZSectionLockScreen,  // settings: animated covers (lock screen, player)
+    DZSectionLyrics,      // settings: word by word
     DZSectionCount,
 };
 
@@ -154,6 +155,7 @@ static NSInteger singModelInUse(void) {
         case DZSectionModel:
         case DZSectionDemucs:
         case DZSectionLockScreen:
+        case DZSectionLyrics:
             return self.page == DZPageSettings;
     }
     return NO;
@@ -247,7 +249,8 @@ static NSInteger singModelInUse(void) {
             if (st != DZDemucsReady) return 2;                          // status, download / cancel
             return DZDemucsBenchmarkResult() ? 4 : 3;                   // + benchmark, + result
         }
-        case DZSectionLockScreen: return 1;
+        case DZSectionLockScreen: return 2;
+        case DZSectionLyrics: return 1;
     }
     return 0;
 }
@@ -261,7 +264,8 @@ static NSInteger singModelInUse(void) {
         case DZSectionReverb: return @"Reverb";
         case DZSectionModel: return @"Sing";
         case DZSectionDemucs: return @"Model lab (experimental)";
-        case DZSectionLockScreen: return @"Lock Screen";
+        case DZSectionLockScreen: return @"Animated covers";
+        case DZSectionLyrics: return @"Lyrics";
     }
     return nil;
 }
@@ -301,7 +305,12 @@ static NSInteger singModelInUse(void) {
                    @"working with the screen locked. Takes about a minute. "
                    @"If Deezer closes during it, reopen this page: the result then shows the step it reached and how much memory was left.";
         case DZSectionLockScreen:
-            return @"Plays Apple Music's motion cover of the album on the lock screen, when it has one. Needs iOS 26; paused in Low Power Mode.\n\n"
+            return @"Plays Apple Music's motion cover of the album, when it has one: on the lock screen (needs iOS 26) and inside "
+                   @"the cover square of the full-screen player. Paused in Low Power Mode.";
+        case DZSectionLyrics:
+            return @"Lights up the line being sung word by word. Deezer times whole lines only, so Deezit spreads each line's "
+                   @"time over its words: close, not exact. The Karaoke Mode button sits bottom left in the lyrics: tap to "
+                   @"remove the lead vocals, touch and hold for the options.\n\n"
                    @"Deezit " DEEZIT_VERSION " · github.com/pisknk/Deezit";
     }
     return nil;
@@ -486,12 +495,26 @@ static NSInteger singModelInUse(void) {
         case DZSectionLockScreen: {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
-            cfg.text = @"Animated album covers";
-            cfg.image = [UIImage systemImageNamed:@"lock.rectangle.stack"];
+            BOOL player = ip.row == 1;
+            cfg.text = player ? @"Player" : @"Lock screen";
+            cfg.image = [UIImage systemImageNamed:player ? @"play.rectangle" : @"lock.rectangle.stack"];
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
-            sw.on = DZPrefBool(kDZLockArtwork);
-            [sw addTarget:self action:@selector(toggleLockArtwork:) forControlEvents:UIControlEventValueChanged];
+            sw.on = DZPrefBool(player ? kDZPlayerArtwork : kDZLockArtwork);
+            [sw addTarget:self action:player ? @selector(togglePlayerArtwork:) : @selector(toggleLockArtwork:)
+                forControlEvents:UIControlEventValueChanged];
+            c.accessoryView = sw;
+            return c;
+        }
+        case DZSectionLyrics: {
+            UITableViewCell *c = [self basicCell:tv at:ip];
+            UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
+            cfg.text = @"Word by word";
+            cfg.image = [UIImage systemImageNamed:@"text.quote"];
+            c.contentConfiguration = cfg;
+            UISwitch *sw = [UISwitch new];
+            sw.on = DZPrefBool(kDZWordLyrics);
+            [sw addTarget:self action:@selector(toggleWordLyrics:) forControlEvents:UIControlEventValueChanged];
             c.accessoryView = sw;
             return c;
         }
@@ -535,6 +558,14 @@ static NSInteger singModelInUse(void) {
 
 - (void)toggleLockArtwork:(UISwitch *)sw {
     DZPrefSet(kDZLockArtwork, @(sw.on));
+}
+
+- (void)togglePlayerArtwork:(UISwitch *)sw {
+    DZPrefSet(kDZPlayerArtwork, @(sw.on));
+}
+
+- (void)toggleWordLyrics:(UISwitch *)sw {
+    DZPrefSet(kDZWordLyrics, @(sw.on));
 }
 
 - (void)sliderMoved:(UISlider *)slider {

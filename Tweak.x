@@ -21,6 +21,9 @@
 
 void DZProbesInstall(void);     // DZProbes.x
 void DZPlayerMenuInstall(void); // DZPlayerMenu.x
+void DZPlayerExtrasInstall(void);  // DZPlayerExtras.x
+void DZPlayerArtworkInstall(void); // DZPlayerArtwork.x
+void DZLyricsInstall(void);        // DZLyrics.x
 
 // Hooks live in their own files as %group blocks, each %init-ed by its
 // install function: audio in DZAudioHook.x, UI probes in DZProbes.x, the
@@ -42,6 +45,9 @@ void DZPlayerMenuInstall(void); // DZPlayerMenu.x
         DZAutoMixInstall();
         DZProbesInstall();
         DZPlayerMenuInstall();
+        DZPlayerExtrasInstall();
+        DZPlayerArtworkInstall();
+        DZLyricsInstall();
         DZLockArtworkInstall();
         DZSettingsEntryInstall();
     }

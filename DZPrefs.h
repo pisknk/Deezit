@@ -20,6 +20,8 @@ extern NSString *const kDZVocals;       // float 0 ... 1 vocal level ("Sing"): 1
 extern NSString *const kDZBackingVocals; // float 0 ... 1 how much of the side-panned (backing) vocals to keep
 extern NSString *const kDZSingStrength;  // int 0 Gentle / 1 Normal / 2 Strong
 extern NSString *const kDZSingModel;     // int 0 Spleeter / 1 MDX-Net (UVR MDX-Net 9482, from the model lab)
+extern NSString *const kDZPlayerArtwork; // BOOL  animated album cover in the player's cover square (DZPlayerArtwork.x)
+extern NSString *const kDZWordLyrics;   // BOOL  word-by-word highlight of the line being sung (DZLyrics.x)
 extern NSString *const kDZAutoMix;      // BOOL  plan each crossfade from the two songs (DZAutoMix.x)
 extern NSString *const kDZAudioHook;    // BOOL  kill switch: NO = never touch Deezer's audio graph
                                         //       (read at launch, set from the debug panel)

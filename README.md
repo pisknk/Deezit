@@ -26,6 +26,9 @@ generator (plain ObjC runtime).
 | ••• menu row | **working**: "Playback Controls" and "Karaoke Mode" as the first options of the full-screen player's ••• menu |
 | Sing (AI vocal removal) | **working**, in ••• → Karaoke Mode: Spleeter 2-stems or UVR MDX-Net 9482 (Neural Engine, 49 ms per 5.9 s on an iPhone 13) |
 | AutoMix | **new, untested on a phone**: per-pair crossfades from Apple Music's analysis and Deezit's own, in ••• → Playback Controls |
+| Player extras | **new, untested on a phone**: swipe right to delete in Up next; artist · album opens a Go to artist / album menu |
+| Lyrics | **new, untested on a phone**: Karaoke Mode button (tap: lead vocals off; hold: options); word-by-word highlight (estimated within Deezer's line timing) |
+| Animated cover in the player | **new, untested on a phone**: Apple Music motion cover inside the player's cover square |
 | Debug panel + in-app log | done (three-finger double tap) |
 | Runtime probes | logs which player / settings screens appear, to settle the analysis' open questions |
 | DSP C core (`DZDSP.c`) | not used by the AVAudioEngine backend (Apple's units do the work); kept for other backends |
@@ -172,6 +175,27 @@ pairs Deezer keeps gapless stay gapless. Deezer still does the fading, so
 nothing new runs in the audio path. The log shows each plan ("automix:") and,
 for songs both know, Deezit's analysis next to Apple's.
 
+## Player and lyrics extras
+
+- **Up next:** Deezer deletes a row on a swipe to the left; Deezit adds the
+  same Delete on a swipe to the right (`DZPlayerExtras.x`).
+- **Artist · album line:** opens a native menu, "Go to <artist>" (each
+  artist when there are several) and "Go to <album>", through Deezer's own
+  `dzrGoToArtist:` / `dzrGoToAlbum:`.
+- **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`). Tap:
+  lead vocals to 0 % with the backing vocals kept; tap again to undo. Touch
+  and hold: the Karaoke Mode sheet.
+- **Word by word:** Deezer's lyrics are timed per line only
+  (`LyricsSynchronizedLineFields { lrcTimestamp line lineTranslated
+  milliseconds duration }`, read from its GraphQL reply). Deezit spreads each
+  line's time over its words by syllables and lights them up with a soft
+  wipe. It's close, not exact. Settings → Lyrics → Word by word.
+- **Animated cover in the player** (`DZPlayerArtwork.x`): the album's Apple
+  Music motion cover plays muted inside the cover square, found and cached
+  like the lock-screen one. Settings → Animated covers → Player.
+- Not done: the ••• menu as a native iOS menu. Some of Deezer's menu rows open
+  further pages inside that sheet, which a native menu can't host.
+
 ## Animated lock-screen covers
 
 On iOS 26 and later, Deezit shows the Apple Music motion cover of the album
@@ -220,6 +244,9 @@ DZSongAnalysis.*            song analysis (beats, bars, music start / end), Appl
 DZBufferProbe.x             logs how Deezer schedules audio (what sized the Sing pipeline)
 DZProbes.x                  runtime probes (which player / settings screens appear)
 DZPlayerMenu.x              "Playback Controls" row in the player's ••• menu
+DZPlayerExtras.x            Up next swipe-right delete, artist · album menu
+DZPlayerArtwork.x           animated cover inside the player's cover square
+DZLyrics.x                  lyrics: Karaoke Mode button, word-by-word highlight
 DZLockArtwork.x             animated lock-screen cover (now-playing hook)
 DZAppleMusic.*              Apple Music album match + motion-cover lookup
 DZMotionFile.*              motion cover HLS -> cached local MP4 + still frame
