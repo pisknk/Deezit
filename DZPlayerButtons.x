@@ -30,6 +30,16 @@
 - (UIViewController *)playerMainViewController;
 @end
 
+// Deezer's DZRPlayerButton, declared so ARC sees a real init: its
+// -initWithImage:target:action: returns a different object than the one
+// allocated (it makes one with +buttonWithType:), so calling it through a
+// cast objc_msgSend released the allocated one twice and crashed at launch.
+// Only messaged through an `id` (never the class symbol, which isn't linked).
+@protocol DZPlayerButtonAPI <NSObject>
+- (instancetype)initWithImage:(UIImage *)image target:(id)target action:(SEL)action;
++ (CGFloat)defaultSize;
+@end
+
 static NSString *const kDZPrevBackingKey = @"karaokeTapPrevBacking";
 
 #pragma mark - shared toggles
@@ -106,7 +116,7 @@ static BOOL quickIsOn(DZQuick q) {
         CGFloat side = 44;
         SEL sizeSel = NSSelectorFromString(@"defaultSize");
         if ([cls respondsToSelector:sizeSel]) {
-            CGFloat s = ((CGFloat (*)(id, SEL))objc_msgSend)(cls, sizeSel);
+            CGFloat s = [(Class<DZPlayerButtonAPI>)cls defaultSize];
             if (s > 20 && s < 80) side = s;
         }
         CGFloat point = MAX(18, MIN(24, side * 0.5));
@@ -116,7 +126,12 @@ static BOOL quickIsOn(DZQuick q) {
             UIButton *b = nil;
             if ([cls isSubclassOfClass:[UIButton class]] && [cls instancesRespondToSelector:init]) {
                 @try {
-                    b = ((id (*)(id, SEL, id, id, SEL))objc_msgSend)([cls alloc], init, img, self, @selector(tapped:));
+                    id<DZPlayerButtonAPI> fresh = (id<DZPlayerButtonAPI>)[cls alloc];
+                    id made = [fresh initWithImage:img target:self action:@selector(tapped:)];
+                    b = [made isKindOfClass:[UIButton class]] ? made : nil;
+                    // its +buttonWithType: object may not carry the target: make sure
+                    if (b && ![[b actionsForTarget:self forControlEvent:UIControlEventTouchUpInside] containsObject:@"tapped:"])
+                        [b addTarget:self action:@selector(tapped:) forControlEvents:UIControlEventTouchUpInside];
                 } @catch (NSException *e) {
                     b = nil;
                 }
@@ -221,13 +236,32 @@ static void placeButtons(DZRPlayerTrackActionsController *c) {
     [q refresh];
 }
 
+// Crash guard: a marker file is written before the first placing of a launch
+// and removed once it has worked. If Deezer died in between, the next launch
+// finds the marker and leaves the row alone, so a broken build can't keep
+// Deezer from opening.
+static NSString *guardPath(void) {
+    NSURL *caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *dir = [caches URLByAppendingPathComponent:@"Deezit" isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [dir URLByAppendingPathComponent:@"player-buttons.placing"].path;
+}
+
+static BOOL sPlacedOnce;
+
 %group DZPlayerButtonHooks
 
 %hook DZRPlayerTrackActionsController
 
 - (void)updateButtons {
     %orig;
+    BOOL first = !sPlacedOnce;
+    if (first) [[NSData data] writeToFile:guardPath() atomically:NO];
     @try { placeButtons(self); } @catch (NSException *e) { DZLog("player: couldn't add the buttons: %@", e.reason); }
+    if (first) {
+        sPlacedOnce = YES;
+        [NSFileManager.defaultManager removeItemAtPath:guardPath() error:nil];
+    }
 }
 
 %end
@@ -237,6 +271,11 @@ static void placeButtons(DZRPlayerTrackActionsController *c) {
 void DZPlayerButtonsInstall(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        if ([NSFileManager.defaultManager fileExistsAtPath:guardPath()]) {
+            [NSFileManager.defaultManager removeItemAtPath:guardPath() error:nil];   // try again next launch
+            DZLog("player: Deezer closed while Deezit was adding its player buttons last time; not adding them this launch");
+            return;
+        }
         Class c = objc_getClass("DZRPlayerTrackActionsController");
         if (c && class_getInstanceMethod(c, @selector(updateButtons)) && class_getInstanceMethod(c, @selector(stackView))) {
             %init(DZPlayerButtonHooks);
