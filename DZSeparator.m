@@ -9,6 +9,7 @@
 #import "DZDemucsModel.h"
 #import "DZAudioParams.h"
 #import "DZLog.h"
+#import "DZAutoMix.h"
 
 __thread int DZSingInside;
 
@@ -92,6 +93,7 @@ static BOOL setupFFT(void) {
 @property (nonatomic) int64_t start;
 @property (nonatomic) AVAudioFrameCount frames;
 @property (nonatomic, copy) AVAudioNodeCompletionHandler completion;
+@property (nonatomic) uint64_t song;   // AutoMix's note of which song it is (DZAutoMixTakePending)
 @end
 @implementation DZHeld
 @end
@@ -191,7 +193,9 @@ static void resetSession(DZSepNode *s) {
 // Queues one buffer for the player, in order. Call with the lock held. If the
 // node was stopped (stop / seek / skip) before it runs, the buffer isn't
 // played but Deezer's completion still runs, so its bookkeeping stays right.
-static void enqueueSchedule(DZSepNode *s, AVAudioPCMBuffer *buffer, AVAudioNodeCompletionHandler handler) {
+// `song` is AutoMix's note of which song the buffer is (taken on Deezer's
+// thread, handed back on this queue right before the buffer is scheduled).
+static void enqueueSchedule(DZSepNode *s, AVAudioPCMBuffer *buffer, AVAudioNodeCompletionHandler handler, uint64_t song) {
     s->pending++;
     uint64_t stopGen = s->stopGen;
     AVAudioFrameCount frames = buffer.frameLength;
@@ -205,10 +209,12 @@ static void enqueueSchedule(DZSepNode *s, AVAudioPCMBuffer *buffer, AVAudioNodeC
         } else {
             atomic_fetch_add(&s->playerFrames, (int64_t)frames);
             DZSingInside++;
+            DZAutoMixSetPending(song);
             [node scheduleBuffer:buffer atTime:nil options:0 completionHandler:^{
                 atomic_fetch_sub(&s->playerFrames, (int64_t)frames);
                 if (handler) handler();
             }];
+            DZAutoMixSetPending(0);
             DZSingInside--;
         }
         os_unfair_lock_lock(&s->lock);
@@ -219,7 +225,7 @@ static void enqueueSchedule(DZSepNode *s, AVAudioPCMBuffer *buffer, AVAudioNodeC
 
 // Hands every held buffer to the player as it is (unprocessed). Lock held.
 static void releaseHeldRaw(DZSepNode *s) {
-    for (DZHeld *h in s.held) enqueueSchedule(s, h.buffer, h.completion);
+    for (DZHeld *h in s.held) enqueueSchedule(s, h.buffer, h.completion, h.song);
     [s.held removeAllObjects];
 }
 
@@ -531,7 +537,7 @@ static void runCompute(DZSepNode *s, uint64_t gen) {
                     }
                 }
             }
-            enqueueSchedule(s, h.buffer, h.completion);
+            enqueueSchedule(s, h.buffer, h.completion, h.song);
             [s.held removeObjectAtIndex:0];
         }
         os_unfair_lock_unlock(&s->lock);
@@ -561,13 +567,16 @@ BOOL DZSingSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioNo
         objc_setAssociatedObject(node, kDZSepKey, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         note([NSString stringWithFormat:@"on for player #%lu", (unsigned long)s.serial]);
     }
+    // from here Sing schedules this buffer later on its own queue: AutoMix's
+    // note of which song it is goes with it
+    uint64_t song = DZAutoMixTakePending();
 
     os_unfair_lock_lock(&s->lock);
     if (!active || s->degraded) {
         // Sing off (or given up): let held buffers go as they are, end the session
         if (s->inCount > 0 || s.held.count) resetSession(s);
         releaseHeldRaw(s);
-        enqueueSchedule(s, buffer, handler);
+        enqueueSchedule(s, buffer, handler, song);
         os_unfair_lock_unlock(&s->lock);
         return YES;
     }
@@ -601,7 +610,7 @@ BOOL DZSingSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioNo
     if (s->holding && s.held.count && queued < kPanicSeconds) {
         s->degraded = YES;
         releaseHeldRaw(s);
-        enqueueSchedule(s, buffer, handler);
+        enqueueSchedule(s, buffer, handler, song);
         os_unfair_lock_unlock(&s->lock);
         note([NSString stringWithFormat:@"player #%lu queue fell to %.2f s, playing this one without Sing",
               (unsigned long)s.serial, queued]);
@@ -613,9 +622,10 @@ BOOL DZSingSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioNo
         h.start = start;
         h.frames = n;
         h.completion = handler;
+        h.song = song;
         [s.held addObject:h];
     } else {
-        enqueueSchedule(s, buffer, handler);
+        enqueueSchedule(s, buffer, handler, song);
     }
     kickCompute(s);
     os_unfair_lock_unlock(&s->lock);

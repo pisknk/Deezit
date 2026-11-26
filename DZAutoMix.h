@@ -15,3 +15,9 @@ NSUInteger DZAutoMixLearnedSongs(void);   // songs Deezit has analysed itself
 // changes the next song's tempo (only when canReplace), a new one of another
 // length. Deezer's completion handler goes with whichever is scheduled.
 AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, BOOL canReplace);
+
+// For a hook that schedules Deezer's buffer later on another thread (Karaoke):
+// take the note of which song it is on Deezer's thread, and set it back on the
+// scheduling thread right before scheduling (0 clears it).
+uint64_t DZAutoMixTakePending(void);
+void DZAutoMixSetPending(uint64_t note);

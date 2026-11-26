@@ -87,7 +87,8 @@ static id kv(id o, NSString *key) {
 }
 
 // Consecutive tracks of one album (track n then n + 1, or the next disc's
-// first): Deezer plays them gapless with its crossfade on, so AutoMix does too.
+// first). Deezer plays them gapless with its crossfade on; AutoMix mixes them
+// like any pair unless one runs straight into the next (flowsInto).
 static BOOL sameAlbumInOrder(id a, id b) {
     id pa = kv(a, @"albumId") ? a : kv(a, @"playableObject"), pb = kv(b, @"albumId") ? b : kv(b, @"playableObject");
     id albumA = kv(pa, @"albumId"), albumB = kv(pb, @"albumId");
@@ -235,6 +236,15 @@ static void askApple(NSString *isrc, NSString *title) {
 
 #pragma mark - planning
 
+// A's music goes on to its very end and B's starts at once: one piece of music
+// split in two tracks (a live album, a medley), so it stays gapless.
+static BOOL flowsInto(DZSongInfo *a, DZSongInfo *b) {
+    if (!a || a.duration <= 0 || a.musicEnd <= 0) return NO;
+    BOOL aRunsOut = a.duration - a.musicEnd < 1.0;
+    BOOL bStartsAtOnce = !b || b.musicStart < 0.5;
+    return aRunsOut && bStartsAtOnce;
+}
+
 static void logPlan(NSString *key, double value, NSString *line) {
     @synchronized (lockObj()) {
         NSNumber *last = sLogged[key];
@@ -293,12 +303,20 @@ static void logPlan(NSString *key, double value, NSString *line) {
 // as the song going out (A)
 @property (nonatomic) float steadyVolume;    // its node's volume before Deezer's fade-out
 @property (nonatomic) BOOL loggedHold;
+@property (nonatomic) unsigned long serial;  // its number in sListens
 @end
 
 @implementation DZTrackListen
 @end
 
 static void *kListenKey = &kListenKey;
+
+// Every song being decoded, by number (weak: a song that's gone looks up as
+// nil). What a read leaves for the schedule that follows is this number, never
+// a pointer: a schedule can come much later on another thread (Karaoke
+// schedules on its own queue), by when the song may be gone.
+static NSMapTable<NSNumber *, DZTrackListen *> *sListens;   // under lockObj()
+static unsigned long sListenSerial;                          // under lockObj()
 
 static void beginListening(id controller, id track, double startPosition) {
     if (!autoMixOn()) {
@@ -311,6 +329,10 @@ static void beginListening(id controller, id track, double startPosition) {
     l.controller = controller;
     l.time = startPosition > 0 ? startPosition : 0;
     l.seekedTo = startPosition > 0.05 ? startPosition : -1;
+    @synchronized (lockObj()) {
+        l.serial = ++sListenSerial;
+        [sListens setObject:l forKey:@(l.serial)];
+    }
     if (!l.isrc || startPosition > 0.05) {
         l.off = YES;
     } else {
@@ -807,12 +829,23 @@ static void installVolumeHold(void) {
 
 // Deezer 11.27.0 decodes into CommonAudio.StereoBufferList, not an
 // AVAudioPCMBuffer, then copies that into the AVAudioPCMBuffer it schedules on
-// the song's player node. So a read only marks, on its thread, which song the
-// next scheduled buffer belongs to; the buffer probe hands that buffer over
-// (DZAutoMixScheduledBuffer) and the node remembers the song.
-static __thread __unsafe_unretained DZTrackListen *tPending;
-static __thread BOOL tPendingEnd;
+// the song's player node. So a read only notes, on its thread, which song the
+// next scheduled buffer belongs to (the song's number << 1 | end of song); the
+// buffer probe hands that buffer over (DZAutoMixScheduledBuffer) and the node
+// remembers the song. Karaoke takes the note with the buffer to its own queue
+// and puts it back there right before scheduling it.
+static __thread uint64_t tPending;
 static _Atomic long sUnlinked, sLinked;
+
+uint64_t DZAutoMixTakePending(void) {
+    uint64_t t = tPending;
+    tPending = 0;
+    return t;
+}
+
+void DZAutoMixSetPending(uint64_t note) {
+    tPending = note;
+}
 
 static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
     DZTrackListen *l = objc_getAssociatedObject(controller, kListenKey);
@@ -823,8 +856,7 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
     }
     // always linked (not only while learning): the transition effects need
     // each scheduled buffer's song and position
-    tPending = l;
-    tPendingEnd = end;
+    tPending = ((uint64_t)l.serial << 1) | (end ? 1 : 0);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         DZLog("automix: Deezer decodes into %@: learning from the buffers it schedules instead",
@@ -834,10 +866,13 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
 
 AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, BOOL canReplace) {
     if (!node || !buffer) return buffer;
-    DZTrackListen *l = tPending;
-    BOOL end = tPendingEnd;
-    tPending = nil;
-    tPendingEnd = NO;
+    uint64_t note = tPending;
+    tPending = 0;
+    BOOL end = (note & 1) != 0;
+    DZTrackListen *l = nil;
+    if (note) {
+        @synchronized (lockObj()) { l = [sListens objectForKey:@(note >> 1)]; }
+    }
     if (l) {
         if (objc_getAssociatedObject(node, kNodeListenKey) != l)
             objc_setAssociatedObject(node, kNodeListenKey, l, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -898,20 +933,22 @@ AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBu
     @try { setting = [self crossFadeDuration]; } @catch (NSException *e) {}
     tRealSetting = wasReal;
     NSString *key = [NSString stringWithFormat:@"%@>%@", ia ?: titleOf(a), ib ?: titleOf(b)];
-    if (setting > 0.05 && d < 0.05) {
-        logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": Deezer keeps this pair gapless", titleOf(a), titleOf(b)]);
-        atomic_store(&sLastPlanned, 0.0);
-        @synchronized (lockObj()) { sTransition = nil; }
-        return d;
-    }
-    if (sameAlbumInOrder(a, b)) {
-        logPlan(key, 0, [NSString stringWithFormat:@"\"%@\" → \"%@\": next track of the same album, kept gapless", titleOf(a), titleOf(b)]);
-        atomic_store(&sLastPlanned, 0.0);
-        @synchronized (lockObj()) { sTransition = nil; }
-        return 0;
-    }
     NSString *noteA, *noteB, *why;
     DZSongInfo *infoA = knowledge(ia, &noteA), *infoB = knowledge(ib, &noteB);
+    // album tracks in order (and pairs Deezer keeps gapless) are mixed too,
+    // unless the first runs straight into the next
+    BOOL deezerGapless = setting > 0.05 && d < 0.05, album = sameAlbumInOrder(a, b);
+    if (deezerGapless || album) {
+        NSString *reason = !infoA ? [NSString stringWithFormat:@"nothing known about \"%@\" yet", titleOf(a)]
+                         : flowsInto(infoA, infoB) ? @"it runs straight into the next" : nil;
+        if (reason) {
+            logPlan(key, 0, [NSString stringWithFormat:@"\"%@\" → \"%@\": %@, kept gapless (%@)", titleOf(a), titleOf(b),
+                             album ? @"next track of the same album" : @"Deezer plays this pair gapless", reason]);
+            atomic_store(&sLastPlanned, 0.0);
+            @synchronized (lockObj()) { sTransition = nil; }
+            return deezerGapless ? d : 0;
+        }
+    }
     double durA = 0;
     if (ia && [isrcOf([self currentTrack]) isEqualToString:ia]) {
         @try { durA = [self playbackDuration]; } @catch (NSException *e) {}
@@ -1059,6 +1096,7 @@ void DZAutoMixInstall(void) {
         sLoaded = [NSMutableSet set];
         sAsking = [NSMutableSet set];
         sCompared = [NSMutableSet set];
+        sListens = [NSMapTable strongToWeakObjectsMapTable];
         sLogged = [NSMutableDictionary dictionary];
 
         Class player = objc_getClass("DZRAudioPlayer");

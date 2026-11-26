@@ -212,8 +212,10 @@ transition is kept apart from the next one planned.
 Where the music ends comes from Deezit's own analysis when there is one (it
 measured Deezer's file; in the probe Apple's fade-out time was about 2 s early
 for one song), bars from Apple when its release has the same length. A pair
-with nothing known about the first song keeps Deezer's crossfade setting, and
-pairs Deezer keeps gapless stay gapless. The log shows each plan
+with nothing known about the first song keeps Deezer's crossfade setting.
+Album tracks in order are mixed like any pair, unless one runs straight into
+the next (its music goes on to its last second and the next starts at once,
+as on a live album): those stay gapless. The log shows each plan
 ("automix:"), each change as it starts (where A was against the plan), B's
 tempo ("comes in … ms ahead, padded, at …% speed", "back at its own tempo")
 and the volume hold ("holding … at volume …"), and, for songs both know,
