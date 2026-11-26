@@ -18,6 +18,7 @@ NSString *const kDZBackingVocals = @"backingVocals";
 NSString *const kDZSingStrength = @"singStrength";
 NSString *const kDZSingModel = @"singModel";
 NSString *const kDZAutoMix = @"autoMix";
+NSString *const kDZAutoMixTempo = @"autoMixTempo";
 NSString *const kDZPlayerArtwork = @"playerArtwork";
 NSString *const kDZWordLyrics = @"wordLyrics";
 NSString *const kDZNativeMenu = @"nativeMenu";
@@ -53,6 +54,7 @@ static NSDictionary *defaultValues(void) {
         kDZSingStrength: @1,
         kDZSingModel: @0,
         kDZAutoMix: @NO,
+        kDZAutoMixTempo: @YES,
         kDZPlayerArtwork: @YES,
         kDZWordLyrics: @YES,
         kDZNativeMenu: @YES,

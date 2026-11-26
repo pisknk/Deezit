@@ -24,6 +24,7 @@ extern NSString *const kDZPlayerArtwork; // BOOL  animated album cover in the pl
 extern NSString *const kDZWordLyrics;   // BOOL  word-by-word highlight of the line being sung (DZLyrics.x)
 extern NSString *const kDZNativeMenu;   // BOOL  the player's ••• opens a native iOS menu (DZPlayerMenu.x)
 extern NSString *const kDZAutoMix;      // BOOL  plan each crossfade from the two songs (DZAutoMix.x)
+extern NSString *const kDZAutoMixTempo; // BOOL  AutoMix plays the next song at the current one's tempo while they overlap
 extern NSString *const kDZAudioHook;    // BOOL  kill switch: NO = never touch Deezer's audio graph
                                         //       (read at launch, set from the debug panel)
 

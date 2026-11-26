@@ -27,6 +27,7 @@ Deezit_FILES = Tweak.x \
 	DZSongAnalysis.m \
 	DZAutoMix.x \
 	DZTransitionFX.c \
+	DZTimeStretch.c \
 	DZVocalModel.m \
 	DZDemucsModel.m \
 	DZSeparator.m \

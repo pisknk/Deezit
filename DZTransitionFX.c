@@ -20,6 +20,7 @@ struct DZFXState {
     int delayCap, delayLen, writeIdx;
     float fbLow[kMaxCh];
     float dryGain;
+    float levelA;          // A's own fade (ownGainA), last block's value
 };
 
 DZFXState *DZFXStateCreate(double sampleRate) {
@@ -29,6 +30,7 @@ DZFXState *DZFXStateCreate(double sampleRate) {
     s->delayCap = (int)(kMaxDelay * s->sr) + 1;
     for (int c = 0; c < kMaxCh; c++) s->delay[c] = calloc((size_t)s->delayCap, sizeof(float));
     s->dryGain = 1;
+    s->levelA = 1;
     return s;
 }
 
@@ -69,6 +71,26 @@ static double clamp01(double x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
 
 // exponential sweep from f0 to f1 as x goes 0 -> 1
 static double sweep(double f0, double f1, double x) { return f0 * pow(f1 / f0, clamp01(x)); }
+
+// A's level at time t when Deezer's fade-out is held off (1 = untouched)
+static double levelA(const DZFXPlan *p, double t) {
+    if (!p->ownGainA) return 1;
+    switch (p->style) {
+        case DZFXBassSwap: {
+            // full until the swap, gone over the tail (A plays on silently to its end)
+            if (t < p->swap) return 1;
+            double tail = p->tailA > 0.2 ? p->tailA : 2;
+            double x = clamp01((t - p->swap) / tail);
+            return 0.5 * (1 + cos(M_PI * x));
+        }
+        case DZFXFilterFade: {
+            double span = p->durationA - p->start;
+            return span > 0.5 ? cos(0.5 * M_PI * clamp01((t - p->start) / span)) : 1;
+        }
+        default:
+            return 1;   // echo out: A's dry sound stops on the downbeat by itself
+    }
+}
 
 void DZFXProcess(DZFXState *s, const DZFXPlan *p, DZFXRole role, float *const *ch, int channelCount,
                  int frames, int stride, double t0) {
@@ -120,6 +142,18 @@ void DZFXProcess(DZFXState *s, const DZFXPlan *p, DZFXRole role, float *const *c
             float *x = ch[c] + (long)i0 * stride;
             if (hp > 0) runBiquad(highpass(hp, sr), &s->hp[c], x, n, stride);
             if (lp > 0) runBiquad(lowpass(lp < nyq ? lp : nyq, sr), &s->lp[c], x, n, stride);
+        }
+
+        if (role == DZFXRoleA && p->ownGainA) {
+            // ramped across the block from the last block's level
+            float g0 = s->levelA, g1 = (float)levelA(p, t0 + (double)(i0 + n) / sr);
+            if (g0 != 1.0f || g1 != 1.0f) {
+                for (int c = 0; c < channelCount; c++) {
+                    float *x = ch[c] + (long)i0 * stride;
+                    for (int i = 0; i < n; i++) x[(long)i * stride] *= g0 + (g1 - g0) * (float)(i + 1) / (float)n;
+                }
+            }
+            s->levelA = g1;
         }
 
         if (p->style == DZFXEchoOut && role == DZFXRoleA && s->delayLen > 0) {

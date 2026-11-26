@@ -124,8 +124,9 @@ static void maybeSummarize(DZNodeStats *s, CFTimeInterval now) {
 
 // Records one schedule call (the wrapped completion handler, below, keeps the
 // queued-ahead count and then calls Deezer's own handler).
-static void noteSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioTime *when,
-                         AVAudioPlayerNodeBufferOptions options, NSString *how) {
+// Returns the buffer to schedule: AutoMix may hand back a tempo-changed copy.
+static AVAudioPCMBuffer *noteSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAudioTime *when,
+                                      AVAudioPlayerNodeBufferOptions options, NSString *how) {
     DZNodeStats *s = statsFor(node);
     AVAudioFrameCount frames = buffer.frameLength;
     long long queued = atomic_fetch_add(&s->outstandingFrames, (long long)frames) + frames;
@@ -156,7 +157,15 @@ static void noteSchedule(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, AVAu
         }
         maybeSummarize(s, now);
     }
-    DZAutoMixScheduledBuffer(node, buffer);   // AutoMix learns songs from these
+    // AutoMix learns songs from these and shapes its transitions in them; a
+    // looping buffer is never replaced
+    AVAudioPCMBuffer *out = DZAutoMixScheduledBuffer(node, buffer, !(options & AVAudioPlayerNodeBufferLoops));
+    if (!out) return buffer;
+    if (out != buffer) {
+        // the queue counts what's really scheduled
+        atomic_fetch_add(&s->outstandingFrames, (long long)out.frameLength - (long long)frames);
+    }
+    return out;
 }
 
 static AVAudioNodeCompletionHandler wrapPlain(AVAudioPlayerNode *node, AVAudioFrameCount frames, AVAudioNodeCompletionHandler orig) {
@@ -189,32 +198,32 @@ static AVAudioPlayerNodeCompletionHandler wrapTyped(AVAudioPlayerNode *node, AVA
 - (void)scheduleBuffer:(AVAudioPCMBuffer *)buffer completionHandler:(AVAudioNodeCompletionHandler)handler {
     if (sInSchedule || !buffer) { %orig; return; }
     sInSchedule++;
-    noteSchedule(self, buffer, nil, 0, @"scheduleBuffer:completionHandler:");
-    %orig(buffer, wrapPlain(self, buffer.frameLength, handler));
+    AVAudioPCMBuffer *b = noteSchedule(self, buffer, nil, 0, @"scheduleBuffer:completionHandler:");
+    %orig(b, wrapPlain(self, b.frameLength, handler));
     sInSchedule--;
 }
 
 - (void)scheduleBuffer:(AVAudioPCMBuffer *)buffer atTime:(AVAudioTime *)when options:(AVAudioPlayerNodeBufferOptions)options completionHandler:(AVAudioNodeCompletionHandler)handler {
     if (sInSchedule || !buffer) { %orig; return; }
     sInSchedule++;
-    noteSchedule(self, buffer, when, options, @"scheduleBuffer:atTime:options:completionHandler:");
-    %orig(buffer, when, options, wrapPlain(self, buffer.frameLength, handler));
+    AVAudioPCMBuffer *b = noteSchedule(self, buffer, when, options, @"scheduleBuffer:atTime:options:completionHandler:");
+    %orig(b, when, options, wrapPlain(self, b.frameLength, handler));
     sInSchedule--;
 }
 
 - (void)scheduleBuffer:(AVAudioPCMBuffer *)buffer completionCallbackType:(AVAudioPlayerNodeCompletionCallbackType)type completionHandler:(AVAudioPlayerNodeCompletionHandler)handler {
     if (sInSchedule || !buffer) { %orig; return; }
     sInSchedule++;
-    noteSchedule(self, buffer, nil, 0, @"scheduleBuffer:completionCallbackType:completionHandler:");
-    %orig(buffer, type, wrapTyped(self, buffer.frameLength, handler));
+    AVAudioPCMBuffer *b = noteSchedule(self, buffer, nil, 0, @"scheduleBuffer:completionCallbackType:completionHandler:");
+    %orig(b, type, wrapTyped(self, b.frameLength, handler));
     sInSchedule--;
 }
 
 - (void)scheduleBuffer:(AVAudioPCMBuffer *)buffer atTime:(AVAudioTime *)when options:(AVAudioPlayerNodeBufferOptions)options completionCallbackType:(AVAudioPlayerNodeCompletionCallbackType)type completionHandler:(AVAudioPlayerNodeCompletionHandler)handler {
     if (sInSchedule || !buffer) { %orig; return; }
     sInSchedule++;
-    noteSchedule(self, buffer, when, options, @"scheduleBuffer:atTime:options:completionCallbackType:completionHandler:");
-    %orig(buffer, when, options, type, wrapTyped(self, buffer.frameLength, handler));
+    AVAudioPCMBuffer *b = noteSchedule(self, buffer, when, options, @"scheduleBuffer:atTime:options:completionCallbackType:completionHandler:");
+    %orig(b, when, options, type, wrapTyped(self, b.frameLength, handler));
     sInSchedule--;
 }
 

@@ -3,7 +3,9 @@
 //
 // Applied to the buffers Deezer schedules on the outgoing (A) and incoming (B)
 // song's player node, about 3 s before they're heard, by song position: A's
-// effects by A's time, B's by B's time. Deezer still does the volume fades.
+// effects by A's time, B's by B's time. B fades in with Deezer's (shortened)
+// fade-in; A's level is shaped here when Deezer's own fade-out is held off
+// (ownGainA), else by Deezer.
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +28,8 @@ typedef struct {
     double length;     // the overlap (s)
     double durationA;  // A's length (s)
     double beatA;      // one beat of A (s)
+    double tailA;      // bass swap: A fades out over this long after the swap (s)
+    int ownGainA;      // Deezer's fade-out of A is held off: A's level is shaped here
 } DZFXPlan;
 
 typedef struct DZFXState DZFXState;

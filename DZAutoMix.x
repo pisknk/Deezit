@@ -19,6 +19,17 @@
 // Where the music ends comes from Deezit's own analysis when there is one (it
 // measured Deezer's file), bars from Apple when it has them. A pair with
 // nothing known about A keeps Deezer's own value. Lines start with "automix:".
+//
+// Transitions (DZTransitionFX) are applied to the buffers each song schedules,
+// by song position. While the two overlap, B plays at A's tempo
+// (DZTimeStretch: its buffers are scheduled time-stretched, Deezer's clock
+// counts B's own frames so lyrics stay with B) and eases back to its own tempo
+// once A is gone. A mixes out on a phrase before its music winds down; A's
+// last part then plays on silently, so Deezer's fade-out of A (its player
+// node's volume) is held off and the transition shapes A's level instead.
+// Deezer starts B when A's remaining time drops below the crossfade, checked
+// as each ~83 ms buffer of A finishes: Deezer is told 0.12 s more than the
+// plan, and B starts with the few ms of silence that put it exactly on time.
 
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
@@ -30,6 +41,7 @@
 #import "DZSongAnalysis.h"
 #import "DZAutoMix.h"
 #import "DZTransitionFX.h"
+#import "DZTimeStretch.h"
 
 @interface DZRAudioPlayer : NSObject
 - (double)crossFadeDuration;
@@ -41,6 +53,8 @@
 
 @interface DZRAudioTrackController : NSObject
 - (double)totalDuration;
+- (double)elapsedDuration;
+- (id)track;
 @end
 
 // (not @synchronized on Deezer's classes: that would link against their symbols)
@@ -61,6 +75,9 @@ static NSUInteger sLearnedHere;
 static _Atomic double sLastPlanned;   // the crossfade AutoMix last gave Deezer
 static _Atomic double sPlannedAttack; // how fast the next song comes in for that crossfade
 static __thread BOOL tRealSetting;    // inside our own hook: -crossFadeDuration reports Deezer's setting
+static BOOL sHoldReady;               // Deezer's fade-out of A can be held off (setVolume: hooked)
+static const double kStartPad = 0.12; // told to Deezer on top of the plan, so B never starts late (s)
+static const double kMaxOverlap = 50; // longest overlap AutoMix plans (s)
 
 static BOOL autoMixOn(void) { return DZPrefBool(kDZAutoMix); }
 
@@ -243,6 +260,21 @@ static void logPlan(NSString *key, double value, NSString *line) {
 }
 @end
 
+// The time-stretcher of the song coming in, freed with it.
+@interface DZStretchBox : NSObject {
+@public
+    DZStretch *st;
+}
+@end
+
+@implementation DZStretchBox
+- (void)dealloc {
+    DZStretchDestroy(st);
+}
+@end
+
+@class DZTransition;
+
 @interface DZTrackListen : NSObject
 @property (nonatomic, copy) NSString *isrc, *title;
 @property (nonatomic, strong) DZSongAnalyzer *analyzer;
@@ -250,7 +282,17 @@ static void logPlan(NSString *key, double value, NSString *line) {
 @property (nonatomic) BOOL off;    // not from the start, seeked, already known, unusable audio
 @property (nonatomic) BOOL done;
 @property (nonatomic) double time;           // song time (s) of the next buffer it schedules
+@property (nonatomic) double seekedTo;       // where the last seek went (s), -1 none
 @property (nonatomic, strong) DZFXBox *fx;   // transition effects, made when needed
+// as the song coming in (B)
+@property (nonatomic) int joinState;         // 0 first buffer not seen yet, 1 came in with a change, 2 not
+@property (nonatomic, weak) DZTransition *joined;   // the change it came in with
+@property (nonatomic) int padFrames;         // silence before its first buffer (puts it on time)
+@property (nonatomic) double stretchRate, glideFrom, glideTo;   // its tempo plan (song time)
+@property (nonatomic, strong) DZStretchBox *stretch;            // while its tempo is changed
+// as the song going out (A)
+@property (nonatomic) float steadyVolume;    // its node's volume before Deezer's fade-out
+@property (nonatomic) BOOL loggedHold;
 @end
 
 @implementation DZTrackListen
@@ -268,6 +310,7 @@ static void beginListening(id controller, id track, double startPosition) {
     l.title = titleOf(track);
     l.controller = controller;
     l.time = startPosition > 0 ? startPosition : 0;
+    l.seekedTo = startPosition > 0.05 ? startPosition : -1;
     if (!l.isrc || startPosition > 0.05) {
         l.off = YES;
     } else {
@@ -287,6 +330,13 @@ static void stopListening(id controller, unsigned long long toFrame, double samp
         // a seek to the very start before anything was decoded changes nothing
         if (toFrame == 0 && (!l.analyzer || l.analyzer.seconds < 0.5)) return;
         l.off = YES;
+        l.seekedTo = l.time;
+        // a song coming in that's moved: no more tempo change or transition on it
+        if (l.joinState == 1 || l.stretch) {
+            l.joinState = 2;
+            l.stretch = nil;
+            l.padFrames = 0;
+        }
     }
 }
 
@@ -341,20 +391,35 @@ static void feed(DZTrackListen *l, AVAudioPCMBuffer *pb, unsigned int frames, BO
 
 #pragma mark - transitions
 
-// The transition planned for the pair Deezer will change to next. A's effects
-// run on A's buffers by A's time (they're scheduled ~3 s ahead, so before the
-// change starts); B's only once Deezer has really started the crossfade
-// (`natural`: its release began), never after a skip.
+// A transition between A and B. Planned when Deezer asks about the pair
+// (sTransition); once Deezer starts it (A's release began: `natural`) it's
+// also the running one (sActive) until it's over, because Deezer asks about
+// the next pair (B, C) as soon as B starts. A's effects run on A's buffers by
+// A's time (they're scheduled ~3 s ahead, so before the change starts); B's
+// only on a B that came in with the change, never after a skip.
 @interface DZTransition : NSObject
 @property (nonatomic, copy) NSString *isrcA, *isrcB, *titleA, *titleB;
 @property (nonatomic) DZFXPlan fx;
+@property (nonatomic) double stretchRate, glideFrom, glideTo;   // B's tempo plan (B's time)
 @property (nonatomic) BOOL natural;
+@property (nonatomic) double naturalAt;   // CACurrentMediaTime() it started
+@property (nonatomic) double early;       // B started this much before the plan (s): padded with silence
+@property (nonatomic) BOOL misaligned;    // started elsewhere than planned (a seek into it): Deezer's crossfade
 @end
 
 @implementation DZTransition
 @end
 
 static DZTransition *sTransition;   // under lockObj()
+static DZTransition *sActive;       // under lockObj()
+
+// The change running now (started within its overlap plus a margin).
+static DZTransition *activeTransition(void) {
+    DZTransition *tr;
+    @synchronized (lockObj()) { tr = sActive; }
+    if (!tr || !tr.natural || CACurrentMediaTime() - tr.naturalAt > tr.fx.length + 30) return nil;
+    return tr;
+}
 
 static NSString *styleName(DZFXStyle s) {
     switch (s) {
@@ -365,27 +430,56 @@ static NSString *styleName(DZFXStyle s) {
     }
 }
 
-// A's bar line where its music winds down (nil without bars).
-static NSNumber *landingBar(DZSongInfo *a, double end) {
-    NSNumber *pick = nil;
+// A's bar line to mix out on: the last phrase start (every 8th bar from A's
+// first) in the 32 s before A's music winds down, else its last bar there.
+// Nil without bars.
+static NSNumber *mixOutBar(DZSongInfo *a, double end, BOOL *phrase) {
+    NSNumber *last = nil, *start = nil;
+    NSUInteger i = 0;
     for (NSNumber *bar in a.bars) {
         if (bar.doubleValue > end + 0.3) break;
-        pick = bar;
+        last = bar;
+        if (i % 8 == 0 && bar.doubleValue >= end - 32) start = bar;
+        i++;
     }
-    return pick;
+    if (phrase) *phrase = start != nil;
+    return start ?: last;
 }
 
-// Picks the transition for A then B and its crossfade length (what Deezer is
-// told): bass swap when the tempos are within 6 % (half / double time counts),
-// echo out when A has bars, else a filter fade. -1 without knowledge of A.
-static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZFXPlan *fx, double *attack, NSString **why) {
+// One bar of A at `at` (s), from its bar lines, else four beats.
+static double barOf(DZSongInfo *a, double at, double beat) {
+    NSNumber *prev = nil;
+    for (NSNumber *bar in a.bars) {
+        if (prev && bar.doubleValue > at + 0.01) {
+            double d = bar.doubleValue - prev.doubleValue;
+            if (d > 0.5 && d < 8) return d;
+            break;
+        }
+        prev = bar;
+    }
+    return beat > 0 ? 4 * beat : 2;
+}
+
+// Picks the transition for A then B, its overlap (s) and B's tempo plan:
+//   bass swap  tempos within 10 % (half / double time counts; 6 % without
+//              tempo matching): B comes in 2-8 bars before A's phrase without
+//              bass, the bass changes hands on A's bar line, A fades over 2 bars
+//   echo out   A has bars: A's last beats echo, A drops out on B's first downbeat
+//   filter fade otherwise
+// While they overlap B plays at A's tempo, then eases back to its own over a
+// few bars. -1 without knowledge of A.
+static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZFXPlan *fx, double *rateOut,
+                             double *glideFrom, double *glideTo, double *attack, NSString **why) {
     memset(fx, 0, sizeof(*fx));
+    *rateOut = 1;
+    *glideFrom = *glideTo = 0;
     if (!a) return -1;
     double dur = durationA > 1 ? durationA : a.duration;
     if (dur < 20) return -1;
     double end = a.musicEnd > 0 && a.musicEnd <= dur ? a.musicEnd : dur;
     double beatA = a.bpm > 30 ? 60.0 / a.bpm : 0;
-    NSNumber *land = landingBar(a, end);
+    BOOL phrase = NO;
+    NSNumber *land = mixOutBar(a, end, &phrase);
     double lead = 0;
     NSUInteger firstB = NSNotFound;
     if (b) {
@@ -394,59 +488,96 @@ static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZF
         lead = firstB != NSNotFound ? b.bars[firstB].doubleValue : b.musicStart;
         lead = MAX(0, MIN(8, lead));
     }
+    // B's tempo over A's, half / double time folded in
     double ratio = 0;
     if (a.bpm > 30 && b.bpm > 30) {
         ratio = b.bpm / a.bpm;
         while (ratio > 1.5) ratio /= 2;
         while (ratio < 0.75) ratio *= 2;
     }
+    double off = ratio > 0 ? fabs(ratio - 1) : 1;
+    BOOL tempoOn = DZPrefBool(kDZAutoMixTempo);
+    // B's frames per frame heard: B at A's tempo
+    double rate = tempoOn && off > 0.002 && off <= 0.10 ? 1.0 / ratio : 1.0;
+    BOOL inTempo = off <= 0.002 || rate != 1.0;
+    double barB = b.bpm > 30 ? 4 * 60.0 / b.bpm : 2;
     fx->durationA = dur;
     fx->beatA = beatA;
+    fx->ownGainA = sHoldReady;
+    NSString *tempo = rate != 1.0 ? [NSString stringWithFormat:@", B at %.1f %% speed", 100 / rate] : @"";
+    NSString *where = phrase ? @"phrase" : @"bar";
 
-    // bass swap: B plays 2-4 bars without bass, then the bass changes hands on A's bar line
-    if (land && beatA > 0 && ratio > 0 && fabs(ratio - 1) <= 0.06 && firstB != NSNotFound) {
-        int n = fabs(ratio - 1) <= 0.02 ? 4 : 2;
-        for (; n >= 2; n -= 2) {
+    // bass swap
+    if (land && beatA > 0 && ratio > 0 && firstB != NSNotFound && (inTempo || off <= 0.06)) {
+        int ns[3] = { 8, 4, 2 };
+        if (!inTempo) { ns[0] = off <= 0.02 ? 4 : 2; ns[1] = 2; ns[2] = 0; }
+        for (int k = 0; k < 3 && ns[k] > 0; k++) {
+            int n = ns[k];
             if (firstB + n >= b.bars.count) continue;
             double swapB = b.bars[firstB + n].doubleValue;
+            if (swapB > 30) continue;
+            double heardB = swapB / rate;   // B's lead-in as heard
             double swap = land.doubleValue;
-            double d = dur - (swap - swapB);
-            // a long outro: swap on a later bar of A
-            if (d > 20) {
+            where = phrase ? @"phrase" : @"bar";
+            double d = dur - (swap - heardB);
+            // a long outro after the phrase: swap on a later bar of A
+            if (d > kMaxOverlap) {
                 for (NSNumber *bar in a.bars) {
-                    if (dur - (bar.doubleValue - swapB) <= 20) { swap = bar.doubleValue; d = dur - (swap - swapB); break; }
+                    if (bar.doubleValue <= swap) continue;
+                    if (dur - (bar.doubleValue - heardB) <= kMaxOverlap) {
+                        swap = bar.doubleValue;
+                        d = dur - (swap - heardB);
+                        where = @"bar";
+                        break;
+                    }
                 }
             }
-            if (d >= 3 && d <= 20 && swap - swapB > 15) {
-                fx->style = DZFXBassSwap;
-                fx->start = swap - swapB;
-                fx->swap = swap;
-                fx->swapB = swapB;
-                fx->length = d;
-                *attack = MIN(2.0, d / 4);
-                if (why) *why = [NSString stringWithFormat:@"bass swap on A's bar at %.2f s = B's bar %d at %.2f s (tempo %.0f / %.0f bpm), B starts at %.1f s",
-                                 swap, n, swapB, a.bpm, b.bpm, fx->start];
-                return d;
+            if (d < 3 || d > kMaxOverlap || swap - heardB < 15) continue;
+            fx->style = DZFXBassSwap;
+            fx->start = swap - heardB;
+            fx->swap = swap;
+            fx->swapB = swapB;
+            fx->length = d;
+            fx->tailA = 2 * barOf(a, swap, beatA);
+            if (rate != 1.0) {
+                // A's gone after its 2-bar tail; then 8 bars back to B's own tempo
+                *rateOut = rate;
+                *glideFrom = swapB + fx->tailA * rate;
+                *glideTo = *glideFrom + MIN(20.0, 8 * barB);
             }
+            *attack = MIN(2.0, MAX(0.3, heardB / 4));
+            if (why) *why = [NSString stringWithFormat:@"bass swap on A's %@ at %.2f s = B's bar %d at %.2f s (%.0f / %.0f bpm%@), B starts at %.1f s, A out over %.1f s",
+                             where, swap, n, swapB, a.bpm, b.bpm, tempo, fx->start, fx->tailA];
+            return d;
         }
     }
     // echo out: A's last beats echo and A drops out on the bar B's first downbeat lands on
     if (land && beatA > 0) {
-        double swap = land.doubleValue, d = dur - (swap - lead);
-        if (d > 12) {
+        double heardLead = lead / rate;
+        double swap = land.doubleValue, d = dur - (swap - heardLead);
+        if (d > 16) {
             for (NSNumber *bar in a.bars) {
-                if (dur - (bar.doubleValue - lead) <= 12) { swap = bar.doubleValue; d = dur - (swap - lead); break; }
+                if (bar.doubleValue <= swap) continue;
+                if (dur - (bar.doubleValue - heardLead) <= 16) { swap = bar.doubleValue; d = dur - (swap - heardLead); where = @"bar"; break; }
             }
         }
         if (d < 1.5) d = 1.5;
         fx->style = DZFXEchoOut;
         fx->start = dur - d;
-        fx->swap = fx->start + lead;
+        fx->swap = fx->start + heardLead;
         fx->swapB = lead;
         fx->length = d;
         *attack = 0.3;
-        if (why) *why = [NSString stringWithFormat:@"echo out on A's bar at %.2f s (%.0f bpm, echo every %.2f s), B's first bar at %.2f s",
-                         fx->swap, a.bpm, 0.75 * beatA, lead];
+        // B's intro under A's last beats: at A's tempo, then 4 bars back to its own
+        if (rate != 1.0 && lead > beatA) {
+            *rateOut = rate;
+            *glideFrom = lead;
+            *glideTo = lead + MIN(12.0, 4 * barB);
+        } else {
+            tempo = @"";
+        }
+        if (why) *why = [NSString stringWithFormat:@"echo out on A's %@ at %.2f s (%.0f bpm, echo every %.2f s), B's first bar at %.2f s%@",
+                         where, fx->swap, a.bpm, 0.75 * beatA, lead, tempo];
         return d;
     }
     // filter fade, timed like the plain crossfade
@@ -463,25 +594,85 @@ static double planTransition(DZSongInfo *a, DZSongInfo *b, double durationA, DZF
     return d;
 }
 
+static BOOL usableBuffer(AVAudioPCMBuffer *b) {
+    AVAudioFormat *f = b.format;
+    return f.commonFormat == AVAudioPCMFormatFloat32 && !f.isInterleaved && b.floatChannelData &&
+           f.channelCount >= 1 && f.channelCount <= 2;
+}
+
+// On B's first buffer: did it come in with the change Deezer just started?
+// Then it gets its side of the transition, its silence pad and its tempo plan.
+static void joinChange(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t0) {
+    @synchronized (l) {
+        if (l.joinState != 0) return;
+        l.joinState = 2;
+    }
+    if (!l.isrc || !autoMixOn() || t0 > 0.05) return;
+    DZTransition *tr = activeTransition(), *planned;
+    @synchronized (lockObj()) { planned = sTransition; }
+    if (!tr || ![l.isrc isEqualToString:tr.isrcB] || tr.misaligned) {
+        if (planned && [l.isrc isEqualToString:planned.isrcB] && !planned.natural)
+            DZLog("automix: \"%@\" started without its crossfade (a skip, or queued before the change): no transition on it", l.title);
+        return;
+    }
+    double sr = buffer.format.sampleRate > 1000 ? buffer.format.sampleRate : 44100;
+    BOOL stretch = tr.stretchRate > 0 && fabs(tr.stretchRate - 1) > 1e-4 && usableBuffer(buffer) &&
+                   buffer.frameLength >= 2700;
+    @synchronized (l) {
+        l.joinState = 1;
+        l.joined = tr;
+        l.padFrames = (int)lround(MAX(0, tr.early) * sr);
+        if (stretch) {
+            DZStretch *st = DZStretchCreate((int)buffer.format.channelCount, sr, 0);
+            if (st) {
+                l.stretch = [DZStretchBox new];
+                l.stretch->st = st;
+                l.stretchRate = tr.stretchRate;
+                l.glideFrom = tr.glideFrom;
+                l.glideTo = tr.glideTo;
+            }
+        }
+    }
+    DZLog("automix: \"%@\" comes in %.0f ms ahead, padded%@", l.title, tr.early * 1000,
+          l.stretch ? [NSString stringWithFormat:@", at %.1f %% speed until %.1f s, its own tempo from %.1f s",
+                       100 / tr.stretchRate, tr.glideFrom, tr.glideTo] : @"");
+}
+
 static void applyTransition(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t0) {
     if (!l.isrc || !autoMixOn()) return;
-    DZTransition *tr;
-    @synchronized (lockObj()) { tr = sTransition; }
-    if (!tr) return;
-    DZFXPlan p = tr.fx;
+    DZTransition *active = activeTransition(), *planned;
+    @synchronized (lockObj()) { planned = sTransition; }
+    int joined;
+    double seeked;
+    @synchronized (l) {
+        joined = l.joinState;
+        seeked = l.seekedTo;
+    }
     double sr = buffer.format.sampleRate > 1000 ? buffer.format.sampleRate : 44100;
     double t1 = t0 + buffer.frameLength / sr;
+    DZTransition *tr;
     DZFXRole role;
-    if ([l.isrc isEqualToString:tr.isrcA]) {
-        if (t1 < p.start - 2) return;   // not there yet
-        role = DZFXRoleA;
-    } else if ([l.isrc isEqualToString:tr.isrcB]) {
-        if (!tr.natural || t0 > p.length + 2) return;
+    if (joined == 1 && active && l.joined == active && [l.isrc isEqualToString:active.isrcB]) {
+        tr = active;
         role = DZFXRoleB;
+    } else if (active && [l.isrc isEqualToString:active.isrcA]) {
+        tr = active;
+        role = DZFXRoleA;
+    } else if (planned && [l.isrc isEqualToString:planned.isrcA]) {
+        tr = planned;
+        role = DZFXRoleA;
     } else {
         return;
     }
-    if (buffer.format.commonFormat != AVAudioPCMFormatFloat32 || buffer.format.isInterleaved || !buffer.floatChannelData) return;
+    DZFXPlan p = tr.fx;
+    if (tr.misaligned) return;
+    if (role == DZFXRoleA) {
+        if (t1 < p.start - 2) return;          // not there yet
+        if (seeked >= p.start - 3) return;     // jumped into it: Deezer's own crossfade
+    } else if (t0 > MAX(p.length * 1.2, p.swapB + 1) + 2) {
+        return;
+    }
+    if (!usableBuffer(buffer)) return;
     @synchronized (l) {
         if (!l.fx) {
             l.fx = [DZFXBox new];
@@ -492,6 +683,125 @@ static void applyTransition(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t
     }
 }
 
+static double rateAt(DZTrackListen *l, double t) {
+    double r = l.stretchRate;
+    if (r <= 0 || fabs(r - 1) < 1e-4 || t >= l.glideTo) return 1;
+    if (t <= l.glideFrom || l.glideTo <= l.glideFrom) return r;
+    return r + (1 - r) * (t - l.glideFrom) / (l.glideTo - l.glideFrom);
+}
+
+// B's buffer as it's scheduled: the silence pad before the first one, then
+// time-stretched while its tempo is changed. Returns `buffer` when untouched.
+static AVAudioPCMBuffer *shapeIncoming(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t0, BOOL end) {
+    int pad;
+    DZStretchBox *box;
+    @synchronized (l) {
+        if (l.joinState != 1) return buffer;
+        pad = l.padFrames;
+        l.padFrames = 0;
+        box = l.stretch;
+    }
+    if (!pad && !box) return buffer;
+    if (!usableBuffer(buffer)) {
+        @synchronized (l) { l.stretch = nil; }
+        return buffer;
+    }
+    double sr = buffer.format.sampleRate > 1000 ? buffer.format.sampleRate : 44100;
+    int frames = (int)buffer.frameLength, ch = (int)buffer.format.channelCount, stride = (int)buffer.stride;
+    double rate = 1;
+    BOOL finish = NO;
+    int cap = pad + frames;
+    if (box) {
+        rate = rateAt(l, t0 + 0.5 * frames / sr);
+        // back at its own tempo, at its end, or a short buffer (after a seek): hand back to the song as is
+        finish = end || frames < 1200 || fabs(rate - 1) < 1e-4;
+        cap = pad + DZStretchCapacity(box->st, frames, rate);
+    }
+    AVAudioPCMBuffer *out = [[AVAudioPCMBuffer alloc] initWithPCMFormat:buffer.format frameCapacity:(AVAudioFrameCount)cap];
+    if (!out || (int)out.stride != stride) {
+        @synchronized (l) { l.stretch = nil; }
+        return buffer;
+    }
+    float *const *dst = out.floatChannelData;
+    for (int c = 0; c < ch; c++) memset(dst[c], 0, sizeof(float) * (size_t)pad * (size_t)stride);
+    float *shifted[2];
+    for (int c = 0; c < ch; c++) shifted[c] = dst[c] + (long)pad * stride;
+    int n;
+    if (!box) {
+        for (int c = 0; c < ch; c++) {
+            const float *src = buffer.floatChannelData[c];
+            for (int i = 0; i < frames; i++) shifted[c][(long)i * stride] = src[(long)i * stride];
+        }
+        n = frames;
+    } else if (finish) {
+        n = DZStretchFinish(box->st, (const float *const *)buffer.floatChannelData, frames, stride, shifted, stride, cap - pad);
+        @synchronized (l) { l.stretch = nil; }
+        DZLog("automix: \"%@\" back at its own tempo at %.1f s", l.title, t0);
+    } else {
+        n = DZStretchProcess(box->st, (const float *const *)buffer.floatChannelData, frames, stride, rate, shifted, stride, cap - pad);
+    }
+    out.frameLength = (AVAudioFrameCount)(pad + n);
+    if (out.frameLength == 0) return buffer;   // can't happen with >= 1200 frames in; never schedule nothing
+    return out;
+}
+
+#pragma mark - holding Deezer's fade-out of A
+
+// Deezer fades a song out by its player node's volume
+// (DZRAudioTrackController -audioMixingVolumeDidUpdate: -> -setVolume:). While
+// a transition that shapes A itself runs, A's node keeps the volume it had.
+static void (*sOrigSetVolume)(id, SEL, float);
+static void *kNodeListenKey = &kNodeListenKey;
+
+static float heldVolume(DZTrackListen *l, float v) {
+    DZTransition *tr = autoMixOn() ? activeTransition() : nil;
+    BOOL hold = tr && !tr.misaligned && tr.fx.ownGainA && l.isrc && [l.isrc isEqualToString:tr.isrcA] && l.joined != tr;
+    BOOL log = NO;
+    float steady;
+    @synchronized (l) {
+        if (!hold || l.steadyVolume <= 0.001f) {
+            if (!hold) l.steadyVolume = v;
+            return v;
+        }
+        steady = l.steadyVolume;
+        if (!l.loggedHold) {
+            l.loggedHold = YES;
+            log = YES;
+        }
+    }
+    if (log) DZLog("automix: holding \"%@\" at volume %.2f through the transition (Deezer asked %.2f)", l.title, steady, v);
+    return steady;
+}
+
+static void dzSetVolume(id self, SEL _cmd, float v) {
+    if (sHoldReady && [self isKindOfClass:[AVAudioPlayerNode class]]) {
+        DZTrackListen *l = objc_getAssociatedObject(self, kNodeListenKey);
+        if (l) v = heldVolume(l, v);
+    }
+    sOrigSetVolume(self, _cmd, v);
+}
+
+static void installVolumeHold(void) {
+    SEL sel = @selector(setVolume:);
+    Class owner = Nil;
+    for (Class c = [AVAudioPlayerNode class]; c && !owner; c = class_getSuperclass(c)) {
+        unsigned n = 0;
+        Method *ms = class_copyMethodList(c, &n);
+        for (unsigned i = 0; i < n; i++)
+            if (method_getName(ms[i]) == sel) { owner = c; break; }
+        free(ms);
+    }
+    Method m = owner ? class_getInstanceMethod(owner, sel) : NULL;
+    const char *types = m ? method_getTypeEncoding(m) : NULL;
+    if (!types || types[0] != 'v' || !strchr(types, 'f')) {
+        DZLog("automix: no -setVolume: on AVAudioPlayerNode (%s): Deezer fades the songs out itself", types ?: "none");
+        return;
+    }
+    sOrigSetVolume = (void (*)(id, SEL, float))method_getImplementation(m);
+    method_setImplementation(m, (IMP)dzSetVolume);
+    sHoldReady = YES;
+}
+
 // Deezer 11.27.0 decodes into CommonAudio.StereoBufferList, not an
 // AVAudioPCMBuffer, then copies that into the AVAudioPCMBuffer it schedules on
 // the song's player node. So a read only marks, on its thread, which song the
@@ -499,7 +809,6 @@ static void applyTransition(DZTrackListen *l, AVAudioPCMBuffer *buffer, double t
 // (DZAutoMixScheduledBuffer) and the node remembers the song.
 static __thread __unsafe_unretained DZTrackListen *tPending;
 static __thread BOOL tPendingEnd;
-static void *kNodeListenKey = &kNodeListenKey;
 static _Atomic long sUnlinked, sLinked;
 
 static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
@@ -520,8 +829,8 @@ static void listen(id controller, id buffer, unsigned int frames, BOOL end) {
     });
 }
 
-void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer) {
-    if (!node || !buffer) return;
+AVAudioPCMBuffer *DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer, BOOL canReplace) {
+    if (!node || !buffer) return buffer;
     DZTrackListen *l = tPending;
     BOOL end = tPendingEnd;
     tPending = nil;
@@ -535,7 +844,7 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
         if (atomic_fetch_add(&sUnlinked, 1) == 400 && atomic_load(&sLinked) == 0)
             DZLog("automix: Deezer's reads and schedules happen on different threads: Deezit can't learn songs");
     }
-    if (!l) return;
+    if (!l) return buffer;
     double sr = buffer.format.sampleRate > 1000 ? buffer.format.sampleRate : 44100;
     double t0;
     @synchronized (l) {
@@ -543,7 +852,9 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
         l.time = t0 + buffer.frameLength / sr;
     }
     feed(l, buffer, buffer.frameLength, end);   // analysis hears the song as it is
+    joinChange(l, buffer, t0);
     applyTransition(l, buffer, t0);
+    return canReplace ? shapeIncoming(l, buffer, t0, end) : buffer;
 }
 
 #pragma mark - hooks
@@ -586,11 +897,14 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
     NSString *key = [NSString stringWithFormat:@"%@>%@", ia ?: titleOf(a), ib ?: titleOf(b)];
     if (setting > 0.05 && d < 0.05) {
         logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": Deezer keeps this pair gapless", titleOf(a), titleOf(b)]);
+        atomic_store(&sLastPlanned, 0.0);
+        @synchronized (lockObj()) { sTransition = nil; }
         return d;
     }
     if (sameAlbumInOrder(a, b)) {
         logPlan(key, 0, [NSString stringWithFormat:@"\"%@\" → \"%@\": next track of the same album, kept gapless", titleOf(a), titleOf(b)]);
         atomic_store(&sLastPlanned, 0.0);
+        @synchronized (lockObj()) { sTransition = nil; }
         return 0;
     }
     NSString *noteA, *noteB, *why;
@@ -600,8 +914,8 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
         @try { durA = [self playbackDuration]; } @catch (NSException *e) {}
     }
     DZFXPlan fx;
-    double attack = 0;
-    double planned = planTransition(infoA, infoB, durA, &fx, &attack, &why);
+    double attack = 0, rate = 1, glideFrom = 0, glideTo = 0;
+    double planned = planTransition(infoA, infoB, durA, &fx, &rate, &glideFrom, &glideTo, &attack, &why);
     if (planned < 0) {
         logPlan(key, d, [NSString stringWithFormat:@"\"%@\" → \"%@\": nothing known about \"%@\" yet, Deezer's %.1f s",
                          titleOf(a), titleOf(b), titleOf(a), d]);
@@ -611,33 +925,53 @@ void DZAutoMixScheduledBuffer(AVAudioPlayerNode *node, AVAudioPCMBuffer *buffer)
     }
     logPlan(key, planned, [NSString stringWithFormat:@"\"%@\" → \"%@\": %@, %.1f s · %@ · A: %@, B: %@",
                            titleOf(a), titleOf(b), styleName(fx.style), planned, why, noteA ?: @"-", noteB ?: @"nothing known"]);
-    atomic_store(&sLastPlanned, planned);
+    // Deezer starts B once A's remaining time is at most this, checked as each
+    // of A's buffers finishes: a little more than planned, so B is never late
+    // (it starts with the silence that puts it on time)
+    double told = planned + kStartPad;
+    DZTransition *running = activeTransition();
+    if (running && [running.isrcA isEqual:ia] && [running.isrcB isEqual:ib]) return told;   // already under way
+    atomic_store(&sLastPlanned, told);
     atomic_store(&sPlannedAttack, attack);
-    @synchronized (lockObj()) {
-        // same pair: keep whether its crossfade has started
-        BOOL started = sTransition.natural && [sTransition.isrcA isEqual:ia] && [sTransition.isrcB isEqual:ib];
-        DZTransition *tr = [DZTransition new];
-        tr.isrcA = ia;
-        tr.isrcB = ib;
-        tr.titleA = titleOf(a);
-        tr.titleB = titleOf(b);
-        tr.fx = fx;
-        tr.natural = started;
-        sTransition = tr;
-    }
-    return planned;
+    DZTransition *tr = [DZTransition new];
+    tr.isrcA = ia;
+    tr.isrcB = ib;
+    tr.titleA = titleOf(a);
+    tr.titleB = titleOf(b);
+    tr.fx = fx;
+    tr.stretchRate = rate;
+    tr.glideFrom = glideFrom;
+    tr.glideTo = glideTo;
+    @synchronized (lockObj()) { sTransition = tr; }
+    return told;
 }
 
-// Deezer starts the crossfade (A's release; B starts right after): from now
-// on B's buffers get their part of the transition.
+// Deezer starts the crossfade (A's release; B starts right after, from the
+// same buffer completion of A). `mixable` is A's track controller: where A
+// is now says how far ahead of the plan B starts (padded with silence), or
+// that the change started somewhere else (a seek into it).
 - (void)mixablePlaybackWillStartPlaybackRelease:(id)mixable withDuration:(double)duration {
     if (autoMixOn() && duration > 0.05) {
         DZTransition *tr;
-        @synchronized (lockObj()) {
-            tr = sTransition;
+        @synchronized (lockObj()) { tr = sTransition; }
+        NSString *isrc = nil;
+        double elapsed = -1;
+        @try {
+            if ([mixable respondsToSelector:@selector(track)]) isrc = isrcOf([(DZRAudioTrackController *)mixable track]);
+            if ([mixable respondsToSelector:@selector(elapsedDuration)]) elapsed = [(DZRAudioTrackController *)mixable elapsedDuration];
+        } @catch (NSException *e) {}
+        if (tr && !tr.natural && (!isrc || [isrc isEqualToString:tr.isrcA])) {
+            double early = elapsed >= 0 && isrc ? tr.fx.start - elapsed : kStartPad - 0.04;
+            BOOL misaligned = early < -0.03 || early > kStartPad + 0.15;
+            tr.early = misaligned ? 0 : MAX(0, early);
+            tr.misaligned = misaligned;
+            tr.naturalAt = CACurrentMediaTime();
             tr.natural = YES;
+            @synchronized (lockObj()) { sActive = tr; }
+            DZLog("automix: %@ from \"%@\" into \"%@\" (%.1f s) · A at %.2f s, planned %.2f s%@", styleName(tr.fx.style),
+                  tr.titleA, tr.titleB, duration, elapsed, tr.fx.start,
+                  misaligned ? @" · not where planned (a seek?): Deezer's own crossfade" : @"");
         }
-        if (tr) DZLog("automix: %@ from \"%@\" into \"%@\" (%.1f s)", styleName(tr.fx.style), tr.titleA, tr.titleB, duration);
     }
     %orig;
 }
@@ -732,6 +1066,7 @@ void DZAutoMixInstall(void) {
             return;
         }
         %init(DZAutoMixPlan);
+        installVolumeHold();
 
         Class controller = objc_getClass("DZRAudioTrackController");
         SEL need[] = { @selector(prepareToPlayTrack:ofCollection:), @selector(prepareToPlayTrack:ofCollection:startingTimePosition:userInfo:),
