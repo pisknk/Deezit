@@ -241,6 +241,15 @@ Deezit's analysis next to Apple's.
   (`microphoneMusicFill`, `noteDoubleFill`; Tempo has no filled gauge, so it's
   cut out of a solid disc). SF Symbols if Tempo isn't found. The row is spaced
   evenly. Tap: on / off; touch and hold: the feature's sheet.
+- **Icons everywhere** (`DZIcons.m`): every Deezit icon comes from the same
+  Tempo set, Deezer's own (`<name>.small` 16 pt / `<name>.medium` 24 pt):
+  the ••• menu rows (`sliders`, `microphoneMusic`, `human`, `disc`,
+  `dotsHorizontal`), the lyrics Karaoke pill (`microphoneMusic`), the Deezit
+  card in Deezer's Settings (`waveform`, `chevronRight`), Deezit's Settings
+  (`gauge`, `noteDouble`, `stopwatch`, `microphoneMusic`, `waveformPath`,
+  `playCircle`, `lock`, `dotsHorizontal`, `text`, `chevronLeft` / `cross`)
+  and the debug log (`share`, `dotsHorizontal`, `gear`, `squareDouble`,
+  `trash`, `wrench` / `slashCircle`). Each has an SF Symbol to fall back on.
 - **Karaoke Mode button** in the lyrics, bottom left (`DZLyrics.x`): a
   "Karaoke Mode" pill that shrinks to a round icon. Tap: lead vocals to 0 %
   with the backing vocals kept; tap again to undo. Touch and hold: the
@@ -295,6 +304,7 @@ everything: filter `subsystem:com.pisknk.deezit`.
 ```
 Tweak.x                     entry point (%ctor)
 DZLog.h / DZDebugLog.*      logging: os_log + in-app ring + log files
+DZIcons.*                   Deezer's Tempo icons (from its bundle at runtime), SF Symbol fallback
 DZPrefs.*                   NSUserDefaults suite + atomic mirror for the audio thread
 DZAudioParams.h             plain-C params struct shared with the DSP
 DZPresets.*                 Off / Slowed / Slowed + Reverb / Dreamy / Sped Up / Nightcore

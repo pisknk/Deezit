@@ -20,6 +20,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "DZLog.h"
+#import "DZIcons.h"
 
 @interface DZRQueueListViewController : UIViewController
 - (UITableView *)tableView;
@@ -47,7 +48,7 @@ static NSString *str(id v) {
 
 #pragma mark - artist · album menu
 
-// The destinations for the track playing now, as (title, symbol, block).
+// The destinations for the track playing now, as (title, Tempo icon, block).
 static NSArray<NSArray *> *destinations(UIViewController *vc) {
     if (![vc respondsToSelector:@selector(currentTrack)]) return @[];
     id track = [(DZRPlayerMainViewController *)vc currentTrack];
@@ -66,7 +67,7 @@ static NSArray<NSArray *> *destinations(UIViewController *vc) {
                 UIViewController *v = weakVC;
                 if (v) ((void (*)(id, SEL, id))objc_msgSend)(v, goArtist, artist);
             };
-            [out addObject:@[[NSString stringWithFormat:@"Go to “%@”", name], @"person.crop.circle", go]];
+            [out addObject:@[[NSString stringWithFormat:@"Go to “%@”", name], @"human", go]];
         }
     }
     SEL goAlbum = NSSelectorFromString(@"dzrGoToAlbum:");
@@ -77,7 +78,7 @@ static NSArray<NSArray *> *destinations(UIViewController *vc) {
             UIViewController *v = weakVC;
             if (v) ((void (*)(id, SEL, id))objc_msgSend)(v, goAlbum, album);
         };
-        [out addObject:@[[NSString stringWithFormat:@"Go to “%@”", name], @"square.stack", go]];
+        [out addObject:@[[NSString stringWithFormat:@"Go to “%@”", name], @"disc", go]];
     }
     return out;
 }
@@ -89,7 +90,7 @@ static UIMenu *artistAlbumMenu(UIViewController *vc) {
         UIViewController *v = weakVC;
         for (NSArray *d in v ? destinations(v) : @[]) {
             void (^go)(void) = d[2];
-            [actions addObject:[UIAction actionWithTitle:d[0] image:[UIImage systemImageNamed:d[1]] identifier:nil
+            [actions addObject:[UIAction actionWithTitle:d[0] image:DZIcon(d[1], [d[1] isEqualToString:@"human"] ? @"person.crop.circle" : @"square.stack", 0) identifier:nil
                                                  handler:^(UIAction *a) { go(); }]];
         }
         completion(actions);

@@ -1,4 +1,5 @@
 #import "DZDebugViewController.h"
+#import "DZIcons.h"
 #import "DZDebugLog.h"
 #import "DZPrefs.h"
 #import "DZAudioHook.h"
@@ -86,9 +87,9 @@ void DZToast(NSString *message) {
 
     self.navigationItem.leftBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(done)];
-    UIBarButtonItem *share =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(share:)];
-    UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"] menu:nil];
+    UIBarButtonItem *share = [[UIBarButtonItem alloc] initWithImage:DZIcon(@"share", @"square.and.arrow.up", 0)
+                                                              style:UIBarButtonItemStylePlain target:self action:@selector(share:)];
+    UIBarButtonItem *more = [[UIBarButtonItem alloc] initWithImage:DZIcon(@"dotsHorizontal", @"ellipsis.circle", 0) menu:nil];
     self.navigationItem.rightBarButtonItems = @[share, more];
     [self rebuildMenu];
 
@@ -106,22 +107,22 @@ void DZToast(NSString *message) {
 - (void)rebuildMenu {
     __weak __typeof(self) weakSelf = self;
     BOOL hookOn = DZPrefBool(kDZAudioHook);
-    UIAction *settings = [UIAction actionWithTitle:@"Open Deezit settings" image:[UIImage systemImageNamed:@"slider.horizontal.3"]
+    UIAction *settings = [UIAction actionWithTitle:@"Open Deezit settings" image:DZIcon(@"gear", @"gearshape", 0)
                                         identifier:nil handler:^(UIAction *a) {
         [weakSelf.navigationController dismissViewControllerAnimated:YES completion:^{ DZPresentSettings(); }];
     }];
-    UIAction *copy = [UIAction actionWithTitle:@"Copy log" image:[UIImage systemImageNamed:@"doc.on.doc"]
+    UIAction *copy = [UIAction actionWithTitle:@"Copy log" image:DZIcon(@"squareDouble", @"doc.on.doc", 0)
                                     identifier:nil handler:^(UIAction *a) {
         UIPasteboard.generalPasteboard.string = [weakSelf fullText];
         DZToast(@"Deezit: log copied");
     }];
-    UIAction *clear = [UIAction actionWithTitle:@"Clear log" image:[UIImage systemImageNamed:@"trash"]
+    UIAction *clear = [UIAction actionWithTitle:@"Clear log" image:DZIcon(@"trash", @"trash", 0)
                                      identifier:nil handler:^(UIAction *a) {
         DZDebugLogClear();
     }];
     clear.attributes = UIMenuElementAttributesDestructive;
     UIAction *hook = [UIAction actionWithTitle:hookOn ? @"Turn audio hook off (relaunch)" : @"Turn audio hook on (relaunch)"
-                                         image:[UIImage systemImageNamed:hookOn ? @"bolt.slash" : @"bolt"]
+                                         image:(hookOn ? DZIcon(@"slashCircle", @"bolt.slash", 0) : DZIcon(@"wrench", @"bolt", 0))
                                     identifier:nil handler:^(UIAction *a) {
         BOOL now = !DZPrefBool(kDZAudioHook);
         DZPrefSet(kDZAudioHook, @(now));

@@ -28,6 +28,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "DZLog.h"
+#import "DZIcons.h"
 #import "DZPrefs.h"
 #import "DZSettingsViewController.h"
 
@@ -50,12 +51,13 @@ static void *kDZRowKey = &kDZRowKey;        // sheet VC -> row, and scroll view 
 static void *kDZBaseInsetKey = &kDZBaseInsetKey;
 static const CGFloat kDZRowHeight = 44;
 
-// Deezit's rows, in menu order.
-typedef struct { const char *title, *symbol; } DZMenuItem;
+// Deezit's rows, in menu order: Deezer's Tempo icon, SF Symbol if it's missing.
+typedef struct { const char *title, *icon, *symbol; } DZMenuItem;
 static const DZMenuItem kDZItems[] = {
-    { "Playback Controls", "slider.horizontal.3" },
-    { "Karaoke Mode", "music.mic" },
+    { "Playback Controls", "sliders", "slider.horizontal.3" },
+    { "Karaoke Mode", "microphoneMusic", "music.mic" },
 };
+static UIImage *itemIcon(NSInteger i) { return DZIcon(@(kDZItems[i].icon), @(kDZItems[i].symbol), 0); }
 enum { kDZExtra = sizeof(kDZItems) / sizeof(kDZItems[0]) };
 static NSString *itemTitle(NSInteger i) { return @(kDZItems[i].title); }
 
@@ -76,8 +78,7 @@ static NSString *itemTitle(NSInteger i) { return @(kDZItems[i].title); }
 
 - (instancetype)initWithItem:(NSInteger)item {
     if ((self = [super initWithFrame:CGRectZero])) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightRegular];
-        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@(kDZItems[item].symbol) withConfiguration:cfg]];
+        UIImageView *icon = [[UIImageView alloc] initWithImage:itemIcon(item)];
         icon.tintColor = UIColor.labelColor;
         icon.contentMode = UIViewContentModeCenter;
         icon.translatesAutoresizingMaskIntoConstraints = NO;
@@ -281,9 +282,7 @@ static UITableViewCell *itemCell(UITableView *tv, NSInteger item) {
     UITableViewCell *cell = objc_getAssociatedObject(tv, kDZCellKeys[item]);
     if (cell) return cell;
     NSString *rid = item == 1 ? @"DeezitKaraokeMode" : @"DeezitPlaybackControls";
-    UIImage *icon = [[UIImage systemImageNamed:@(kDZItems[item].symbol)
-                             withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular]]
-                     imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    UIImage *icon = [itemIcon(item) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     Class cls = NSClassFromString(@"Deezer.ContextMenuActionTableViewCell");
     SEL setText = NSSelectorFromString(@"setActionText:");
     SEL setImage = NSSelectorFromString(@"setActionImage:");
@@ -444,7 +443,7 @@ static NSArray<UIMenuElement *> *deezitItems(UIViewController *player) {
     NSMutableArray *out = [NSMutableArray array];
     __weak UIViewController *weakPlayer = player;
     for (NSInteger i = 0; i < kDZExtra; i++) {
-        [out addObject:[UIAction actionWithTitle:itemTitle(i) image:[UIImage systemImageNamed:@(kDZItems[i].symbol)] identifier:nil
+        [out addObject:[UIAction actionWithTitle:itemTitle(i) image:itemIcon(i) identifier:nil
                                          handler:^(UIAction *a) {
             UIViewController *top = topOf(weakPlayer);
             if (!top) return;
@@ -475,7 +474,7 @@ static NSArray<UIMenuElement *> *artistItems(UIViewController *player, NSArray<U
         for (UIMenuElement *e in deezer) dup = dup || [e.title containsString:name];
         if (dup) continue;
         [out addObject:[UIAction actionWithTitle:[NSString stringWithFormat:@"Go to “%@”", name]
-                                           image:[UIImage systemImageNamed:@"person.crop.circle"] identifier:nil
+                                           image:DZIcon(@"human", @"person.crop.circle", 0) identifier:nil
                                          handler:^(UIAction *a) {
             UIViewController *p = weakPlayer;
             if (p) ((void (*)(id, SEL, id))objc_msgSend)(p, go, artist);
@@ -544,7 +543,7 @@ static void collectMenu(UIViewController *player, void (^completion)(NSArray<UIM
             DZLog("menu: native menu with %lu of Deezer's rows", (unsigned long)rows.count);
         } else {
             // couldn't read it: offer Deezer's own sheet
-            [all addObject:[UIAction actionWithTitle:@"More…" image:[UIImage systemImageNamed:@"ellipsis.circle"] identifier:nil
+            [all addObject:[UIAction actionWithTitle:@"More…" image:DZIcon(@"dotsHorizontal", @"ellipsis.circle", 0) identifier:nil
                                              handler:^(UIAction *a) {
                 if (ctx.sheet) showSheet(ctx, nil);
             }]];

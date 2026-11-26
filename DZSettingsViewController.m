@@ -1,4 +1,5 @@
 #import "DZSettingsViewController.h"
+#import "DZIcons.h"
 #import "DZPrefs.h"
 #import "DZPresets.h"
 #import "DZAudioHook.h"
@@ -138,9 +139,7 @@ static UIColor *dzRGB(int r, int g, int b) { return [UIColor colorWithRed:r / 25
     UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.tableView.bounds.size.width, 72)];
     UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
     BOOL pushed = self.navigationController.viewControllers.count > 1 && self.navigationController.topViewController == self;
-    [back setImage:[UIImage systemImageNamed:pushed ? @"chevron.left" : @"xmark"
-                           withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold]]
-          forState:UIControlStateNormal];
+    [back setImage:pushed ? DZIcon(@"chevronLeft", @"chevron.left", 0) : DZIcon(@"cross", @"xmark", 0) forState:UIControlStateNormal];
     back.tintColor = UIColor.whiteColor;
     back.backgroundColor = kDZDeezerButton;
     back.layer.cornerRadius = 22;
@@ -477,7 +476,7 @@ static NSInteger singModelInUse(void) {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"Slowed + Reverb";
-            cfg.image = [UIImage systemImageNamed:@"waveform"];
+            cfg.image = DZIcon(@"gauge", @"waveform", 0);
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(kDZEnabled);
@@ -490,7 +489,7 @@ static NSInteger singModelInUse(void) {
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             BOOL tempo = ip.row == 1;
             cfg.text = tempo ? @"Tempo matching" : @"AutoMix";
-            cfg.image = [UIImage systemImageNamed:tempo ? @"metronome" : @"arrow.triangle.merge"];
+            cfg.image = tempo ? DZIcon(@"stopwatch", @"metronome", 0) : DZIcon(@"noteDouble", @"arrow.triangle.merge", 0);
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(tempo ? kDZAutoMixTempo : kDZAutoMix);
@@ -506,7 +505,7 @@ static NSInteger singModelInUse(void) {
                 cfg.text = @"Vocals";
                 cfg.secondaryText = @"Vocal model not downloaded";
                 cfg.secondaryTextProperties.color = UIColor.secondaryLabelColor;
-                cfg.image = [UIImage systemImageNamed:@"music.mic"];
+                cfg.image = DZIcon(@"microphoneMusic", @"music.mic", 0);
                 c.contentConfiguration = cfg;
                 return c;
             }
@@ -584,7 +583,7 @@ static NSInteger singModelInUse(void) {
             if (ip.row == 0) {
                 cfg.text = @"Vocal model";
                 cfg.secondaryText = DZVocalModelStatusText();
-                cfg.image = [UIImage systemImageNamed:@"music.mic"];
+                cfg.image = DZIcon(@"microphoneMusic", @"music.mic", 0);
             } else {
                 switch (state) {
                     case DZVocalModelNotInstalled:
@@ -619,7 +618,7 @@ static NSInteger singModelInUse(void) {
                 cfg = [UIListContentConfiguration valueCellConfiguration];
                 cfg.text = @"MDX-Net";
                 cfg.secondaryText = DZDemucsStatusText();
-                cfg.image = [UIImage systemImageNamed:@"waveform.badge.magnifyingglass"];
+                cfg.image = DZIcon(@"waveformPath", @"waveform.badge.magnifyingglass", 0);
             } else if (ip.row == 1) {
                 cfg.text = st == DZDemucsDownloading ? @"Cancel download"
                          : st == DZDemucsReady ? @"Delete model"
@@ -646,7 +645,7 @@ static NSInteger singModelInUse(void) {
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             BOOL player = ip.row == 1;
             cfg.text = player ? @"Player" : @"Lock screen";
-            cfg.image = [UIImage systemImageNamed:player ? @"play.rectangle" : @"lock.rectangle.stack"];
+            cfg.image = player ? DZIcon(@"playCircle", @"play.rectangle", 0) : DZIcon(@"lock", @"lock.rectangle.stack", 0);
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(player ? kDZPlayerArtwork : kDZLockArtwork);
@@ -659,7 +658,7 @@ static NSInteger singModelInUse(void) {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"Native ••• menu";
-            cfg.image = [UIImage systemImageNamed:@"ellipsis.circle"];
+            cfg.image = DZIcon(@"dotsHorizontal", @"ellipsis.circle", 0);
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(kDZNativeMenu);
@@ -671,7 +670,7 @@ static NSInteger singModelInUse(void) {
             UITableViewCell *c = [self basicCell:tv at:ip];
             UIListContentConfiguration *cfg = [UIListContentConfiguration cellConfiguration];
             cfg.text = @"Word by word";
-            cfg.image = [UIImage systemImageNamed:@"text.quote"];
+            cfg.image = DZIcon(@"text", @"text.quote", 0);
             c.contentConfiguration = cfg;
             UISwitch *sw = [UISwitch new];
             sw.on = DZPrefBool(kDZWordLyrics);

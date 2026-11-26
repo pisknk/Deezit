@@ -20,6 +20,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "DZLog.h"
+#import "DZIcons.h"
 #import "DZPrefs.h"
 #import "DZQuickActions.h"
 #import "DZSettingsViewController.h"
@@ -96,20 +97,8 @@ typedef NS_ENUM(NSInteger, DZQuick) { DZQuickEffect, DZQuickKaraoke, DZQuickAuto
 // button's icon is closer to the "small" size.
 static NSString *sTempoSize = @"medium";
 
-static NSBundle *tempoBundle(void) {
-    static NSBundle *bundle;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSURL *url = [NSBundle.mainBundle URLForResource:@"Tempo_Tempo" withExtension:@"bundle"];
-        bundle = url ? [NSBundle bundleWithURL:url] : nil;
-    });
-    return bundle;
-}
-
 static UIImage *tempoImage(NSString *name, NSString *size) {
-    NSBundle *b = tempoBundle();
-    UIImage *img = b ? [UIImage imageNamed:[NSString stringWithFormat:@"%@.%@", name, size] inBundle:b compatibleWithTraitCollection:nil] : nil;
-    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    return DZTempoImage(name, size);
 }
 
 // Tempo has no filled gauge: "on" is a solid disc with the gauge cut out of it

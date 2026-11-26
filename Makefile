@@ -19,6 +19,7 @@ TWEAK_NAME = Deezit
 
 Deezit_FILES = Tweak.x \
 	DZDebugLog.m \
+	DZIcons.m \
 	DZPrefs.m \
 	DZPresets.m \
 	DZDSP.c \

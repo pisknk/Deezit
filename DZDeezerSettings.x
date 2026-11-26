@@ -13,6 +13,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "DZLog.h"
+#import "DZIcons.h"
 #import "DZSettingsViewController.h"
 
 static void *kDZCardKey = &kDZCardKey;            // settings VC / scroll view -> the card
@@ -61,16 +62,14 @@ static void openDeezit(UIViewController *host) {
         self.layer.cornerCurve = kCACornerCurveContinuous;
         UIColor *secondary = rgb(210, 177, 211);
 
-        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"waveform"
-            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular]]];
+        UIImageView *icon = [[UIImageView alloc] initWithImage:DZIcon(@"waveform", @"waveform", 0)];
         icon.tintColor = secondary;
         icon.contentMode = UIViewContentModeCenter;
         UILabel *title = [UILabel new];
         title.text = @"Deezit";
         title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
         title.textColor = UIColor.whiteColor;
-        UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
-            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightRegular]]];
+        UIImageView *chevron = [[UIImageView alloc] initWithImage:DZIcon(@"chevronRight", @"chevron.right", 16)];
         chevron.tintColor = secondary;
         for (UIView *v in @[icon, title, chevron]) {
             v.translatesAutoresizingMaskIntoConstraints = NO;

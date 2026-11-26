@@ -31,6 +31,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "DZLog.h"
+#import "DZIcons.h"
 #import "DZPrefs.h"
 #import "DZSettingsViewController.h"
 #import "DZVocalModel.h"
@@ -429,7 +430,10 @@ static UIColor *contrasting(UIColor *c) {
                                                     : UIColor.whiteColor;
 }
 
+// Deezer's Karaoke icon (the player button's): microphoneMusic, filled when on
 static UIImage *micImage(BOOL on) {
+    UIImage *tempo = DZIcon(on ? @"microphoneMusicFill" : @"microphoneMusic", nil, 0);
+    if (tempo) return tempo;
     UIImageSymbolConfiguration *sc = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
     for (NSString *n in on ? @[@"microphone.fill", @"mic.fill"] : @[@"microphone", @"mic"]) {
         UIImage *img = [UIImage systemImageNamed:n withConfiguration:sc];
